@@ -1,0 +1,163 @@
+# Builds the Windows, macOS and Linux installers when a version tag is pushed
+# and publishes them together as one GitHub Release:
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# The tag must match the version in package.json, src-tauri/Cargo.toml and
+# src-tauri/tauri.conf.json. A tag with a pre-release suffix (v0.2.0-beta.1)
+# becomes a pre-release, which the app's "Check for updates" link skips.
+#
+# There is deliberately no updater: the app never downloads anything itself.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag matches the app version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          conf=$(jq -r .version src-tauri/tauri.conf.json)
+          pkg=$(jq -r .version package.json)
+          cargo=$(sed -n 's/^version = "\(.*\)"$/\1/p' src-tauri/Cargo.toml | head -n 1)
+          echo "tag: $tag  tauri.conf.json: $conf  package.json: $pkg  Cargo.toml: $cargo"
+          if [ "$tag" != "$conf" ] || [ "$tag" != "$pkg" ] || [ "$tag" != "$cargo" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the app version. Set all three files to $tag, then tag again."
+            exit 1
+          fi
+
+      # Stays a draft until every platform has uploaded its installers.
+      - name: Create the draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BODY: |
+            ## Download
+
+            | System | File |
+            |---|---|
+            | Windows 10/11 (x64) | `*_x64-setup.exe` |
+            | macOS (Apple Silicon + Intel) | `*_universal.dmg` |
+            | Linux (x64) | `.AppImage`, `.deb` or `.rpm` |
+
+            The installers are not code-signed yet:
+            - **Windows**: if SmartScreen says "Windows protected your PC", click **More info → Run anyway**.
+            - **macOS**: if the app "is damaged" or "can't be opened", move it to Applications and run `xattr -cr /Applications/claude-pulse.app` once.
+
+            ## 下载
+
+            | 系统 | 文件 |
+            |---|---|
+            | Windows 10/11 (x64) | `*_x64-setup.exe` |
+            | macOS（Apple 芯片 + Intel） | `*_universal.dmg` |
+            | Linux (x64) | `.AppImage`、`.deb` 或 `.rpm` |
+
+            安装包暂未签名：
+            - **Windows**：如果 SmartScreen 提示「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」。
+            - **macOS**：如果提示应用「已损坏」或「无法打开」，先拖进「应用程序」，再执行一次 `xattr -cr /Applications/claude-pulse.app`。
+        run: |
+          # Hand-written notes in docs/release-<tag>.md replace the default body.
+          notes="docs/release-$GITHUB_REF_NAME.md"
+          if [ -f "$notes" ]; then
+            BODY=$(cat "$notes")
+          fi
+          # A re-run reuses the release this tag already has.
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id" | head -n 1)
+          if [ -z "$id" ]; then
+            prerelease=false
+            case "$GITHUB_REF_NAME" in *-*) prerelease=true ;; esac
+            id=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$GITHUB_REF_NAME" \
+              -f name="Claude Pulse $GITHUB_REF_NAME" \
+              -f body="$BODY" \
+              -F draft=true \
+              -F prerelease="$prerelease" \
+              -F generate_release_notes=true \
+              --jq .id)
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            args: ""
+          - name: macOS universal
+            os: macos-latest
+            args: --target universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          # The oldest supported runner, so the AppImage runs on older glibc too.
+          - name: Linux x64
+            os: ubuntu-22.04
+            args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - run: npm ci
+
+      # Runs `npm run tauri build` (which builds the frontend first) and uploads
+      # the bundles to the draft release.
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: ${{ matrix.args }}
+          uploadUpdaterJson: false
+
+  publish-release:
+    name: Publish release
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          latest=true
+          case "$GITHUB_REF_NAME" in *-*) latest=false ;; esac
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -f make_latest="$latest" --silent

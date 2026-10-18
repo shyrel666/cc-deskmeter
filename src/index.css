@@ -1,0 +1,780 @@
+@import "tailwindcss";
+
+/*
+ * Claude Pulse design systems.
+ *
+ * Every theme is a full set of tokens on <html data-theme="…">. Components use
+ * the semantic utilities below (bg-surface, text-ink-2, rounded-card, …) and
+ * the `warm:` / `swiss:` / `glass:` variants for structural differences, so a
+ * theme switch is a single attribute change with no re-render of the tree.
+ */
+
+@custom-variant warm (&:where([data-theme="claude-warm"], [data-theme="claude-warm"] *));
+@custom-variant swiss (&:where([data-theme="swiss-industrial"], [data-theme="swiss-industrial"] *));
+@custom-variant glass (&:where([data-theme="glass-bento"], [data-theme="glass-bento"] *));
+
+@theme inline {
+  --color-canvas: var(--pulse-bg);
+  --color-surface: var(--pulse-surface);
+  --color-raised: var(--pulse-raised);
+  --color-line: var(--pulse-line);
+  --color-line-strong: var(--pulse-line-strong);
+  --color-ink: var(--pulse-ink);
+  --color-ink-2: var(--pulse-ink-2);
+  --color-ink-3: var(--pulse-ink-3);
+  --color-accent: var(--pulse-accent);
+  --color-accent-2: var(--pulse-accent-2);
+  --color-accent-3: var(--pulse-accent-3);
+  --color-good: var(--pulse-good);
+  --color-warn: var(--pulse-warn);
+  --color-danger: var(--pulse-danger);
+  --color-track: var(--pulse-track);
+
+  --font-display: var(--pulse-font-display);
+  --font-body: var(--pulse-font-body);
+  --font-num: var(--pulse-font-num);
+  --font-mono: var(--pulse-mono);
+  --font-serif: var(--pulse-serif);
+  --font-sans: var(--pulse-sans);
+
+  --radius-card: var(--pulse-radius-card);
+  --radius-ctl: var(--pulse-radius-ctl);
+  --radius-pill: var(--pulse-radius-pill);
+}
+
+:root {
+  /* Latin faces first; Chinese glyphs fall through to the CJK system faces. */
+  --pulse-sans: "Inter Variable", "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI",
+    "Microsoft YaHei", "Noto Sans CJK SC", system-ui, -apple-system, sans-serif;
+  --pulse-serif: "Newsreader Variable", "Iowan Old Style", "Charter", Georgia, "Times New Roman", "Songti SC",
+    "Noto Serif CJK SC", "Microsoft YaHei", serif;
+  --pulse-mono: "JetBrains Mono Variable", "Cascadia Code", "SF Mono", ui-monospace, Consolas, monospace;
+  /* Soft, wonky display serif used only by the wordmark. */
+  --pulse-wordmark: "Fraunces Variable", var(--pulse-serif);
+}
+
+/* ── Theme 1 · Claude Warm ─────────────────────────────────────────────── */
+[data-theme="claude-warm"] {
+  color-scheme: dark;
+  --pulse-bg: #141413;
+  --pulse-surface: #1e1e1c;
+  --pulse-raised: #262624;
+  --pulse-line: #2e2e2b;
+  --pulse-line-strong: #3d3c38;
+  --pulse-ink: #f4f3ee;
+  --pulse-ink-2: #a3a198;
+  --pulse-ink-3: #6e6c64;
+  --pulse-accent: #d97757;
+  --pulse-accent-2: #6b8e78;
+  --pulse-accent-3: #e5b567;
+  --pulse-good: #6b8e78;
+  --pulse-warn: #e5b567;
+  --pulse-danger: #e0634f;
+  --pulse-track: #2a2a27;
+
+  --pulse-font-display: var(--pulse-serif);
+  --pulse-font-body: var(--pulse-sans);
+  --pulse-font-num: var(--pulse-mono);
+
+  --pulse-radius-card: 12px;
+  --pulse-radius-ctl: 8px;
+  --pulse-radius-pill: 999px;
+}
+
+/* ── Theme 2 · Swiss Industrial ────────────────────────────────────────── */
+/* Braun / Teenage Engineering instrument panel: matte aluminium, ink, signal orange. */
+[data-theme="swiss-industrial"] {
+  color-scheme: light;
+  --pulse-bg: #eaeae6;
+  --pulse-surface: #f7f7f5;
+  --pulse-raised: #efefec;
+  --pulse-line: #d1d1c7;
+  --pulse-line-strong: #bdbdb2;
+  --pulse-ink: #111110;
+  --pulse-ink-2: #5a5a55;
+  --pulse-ink-3: #8c8c84;
+  --pulse-accent: #ff4f00;
+  --pulse-accent-2: #e11d48;
+  --pulse-accent-3: #71716a;
+  --pulse-good: #ff4f00;
+  --pulse-warn: #d29200;
+  --pulse-danger: #e11d48;
+  /* The machined groove that meters, slots and switch tracks are cut into. */
+  --pulse-track: #dfdfda;
+
+  --pulse-font-display: var(--pulse-sans);
+  --pulse-font-body: var(--pulse-sans);
+  --pulse-font-num: var(--pulse-mono);
+
+  --pulse-radius-card: 8px;
+  --pulse-radius-ctl: 6px;
+  --pulse-radius-pill: 999px;
+}
+
+/* ── Theme 3 · Glass Bento ─────────────────────────────────────────────── */
+[data-theme="glass-bento"] {
+  color-scheme: dark;
+  --pulse-bg: #09090b;
+  --pulse-surface: rgba(255, 255, 255, 0.04);
+  --pulse-raised: rgba(255, 255, 255, 0.07);
+  --pulse-line: rgba(255, 255, 255, 0.08);
+  --pulse-line-strong: rgba(255, 255, 255, 0.14);
+  --pulse-ink: #fafafa;
+  --pulse-ink-2: #a1a1aa;
+  --pulse-ink-3: #71717a;
+  --pulse-accent: #8b5cf6;
+  --pulse-accent-2: #3b82f6;
+  --pulse-accent-3: #f43f5e;
+  --pulse-good: #34d399;
+  --pulse-warn: #fbbf24;
+  --pulse-danger: #f43f5e;
+  --pulse-track: rgba(255, 255, 255, 0.06);
+  /* Brand gradient shared by the logo mark and the wordmark: lavender, violet, blue. */
+  --pulse-brand-a: #c4b5fd;
+  --pulse-brand-b: #8b5cf6;
+  --pulse-brand-c: #60a5fa;
+
+  --pulse-font-display: var(--pulse-sans);
+  --pulse-font-body: var(--pulse-sans);
+  --pulse-font-num: var(--pulse-sans);
+
+  --pulse-radius-card: 24px;
+  --pulse-radius-ctl: 12px;
+  --pulse-radius-pill: 999px;
+}
+
+/* ── Base ──────────────────────────────────────────────────────────────── */
+@layer base {
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--pulse-bg);
+    color: var(--pulse-ink);
+    font-family: var(--pulse-font-body);
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--pulse-accent) 35%, transparent);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--pulse-accent);
+    outline-offset: 2px;
+  }
+
+  /* Thin scrollbars that match each surface. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--pulse-line-strong) transparent;
+  }
+}
+
+/* ── Components ────────────────────────────────────────────────────────── */
+@layer components {
+  /* Numbers: tabular figures everywhere, face per theme. */
+  .num {
+    font-family: var(--pulse-font-num);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1, "zero" 0;
+  }
+
+  [data-theme="swiss-industrial"] .num-hero {
+    font-weight: 700;
+    letter-spacing: -0.04em;
+  }
+  [data-theme="glass-bento"] .num-hero {
+    letter-spacing: -0.03em;
+  }
+  [data-theme="claude-warm"] .num-hero {
+    letter-spacing: -0.02em;
+  }
+
+  /* Card ------------------------------------------------------------------ */
+  .pulse-card {
+    position: relative;
+    background: var(--pulse-surface);
+    border: 1px solid var(--pulse-line);
+    border-radius: var(--pulse-radius-card);
+  }
+
+  [data-theme="claude-warm"] .pulse-card {
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 236, 214, 0.035),
+      inset 0 0 32px 0 rgba(217, 119, 87, 0.025),
+      0 1px 2px 0 rgba(0, 0, 0, 0.35);
+  }
+
+  [data-theme="swiss-industrial"] .pulse-card {
+    box-shadow:
+      0 2px 4px rgba(0, 0, 0, 0.04),
+      inset 0 1px 0 #ffffff;
+  }
+
+  [data-theme="glass-bento"] .pulse-card {
+    backdrop-filter: blur(40px) saturate(150%);
+    -webkit-backdrop-filter: blur(40px) saturate(150%);
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.12),
+      0 20px 40px -24px rgba(0, 0, 0, 0.6);
+    transition: background-color 300ms ease, border-color 300ms ease, transform 300ms ease;
+  }
+  [data-theme="glass-bento"] .pulse-card:hover {
+    background: rgba(255, 255, 255, 0.07);
+  }
+
+  /* Card title ------------------------------------------------------------ */
+  .pulse-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--pulse-ink-2);
+    line-height: 1.2;
+  }
+  [data-theme="claude-warm"] .pulse-title {
+    font-family: var(--pulse-serif);
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--pulse-ink);
+    letter-spacing: -0.005em;
+  }
+  [data-theme="swiss-industrial"] .pulse-title {
+    font-family: var(--pulse-sans);
+    font-size: 13.5px;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    color: var(--pulse-ink);
+  }
+  [data-theme="glass-bento"] .pulse-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--pulse-ink-2);
+  }
+
+  /* Small uppercase eyebrow labels inside cards. */
+  .pulse-label {
+    font-size: 11px;
+    color: var(--pulse-ink-3);
+    letter-spacing: 0.02em;
+  }
+  /* Printed panel legends: small mono capitals. */
+  [data-theme="swiss-industrial"] .pulse-label {
+    font-family: var(--pulse-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--pulse-ink-3);
+  }
+  [data-theme="claude-warm"] .pulse-label {
+    font-size: 12px;
+  }
+
+  /* Header shell ---------------------------------------------------------- */
+  [data-theme="claude-warm"] .pulse-header {
+    background: color-mix(in oklab, #141413 82%, transparent);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--pulse-line);
+  }
+  [data-theme="swiss-industrial"] .pulse-header {
+    background: color-mix(in oklab, #eaeae6 86%, transparent);
+    backdrop-filter: blur(14px) saturate(120%);
+    -webkit-backdrop-filter: blur(14px) saturate(120%);
+    border-bottom: 1px solid var(--pulse-line);
+    box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.7);
+  }
+  [data-theme="glass-bento"] .pulse-header {
+    margin-top: 12px;
+    border: 1px solid var(--pulse-line);
+    border-radius: 24px;
+    background: rgba(255, 255, 255, 0.045);
+    backdrop-filter: blur(40px) saturate(160%);
+    -webkit-backdrop-filter: blur(40px) saturate(160%);
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.12), 0 24px 48px -32px rgba(0, 0, 0, 0.8);
+  }
+
+  /* Logo tile ------------------------------------------------------------- */
+  /* Editorial: the mark in clay on a dark tile warmed with the same clay. */
+  [data-theme="claude-warm"] .pulse-logo {
+    border: 1px solid color-mix(in oklab, var(--pulse-accent) 30%, var(--pulse-line));
+    border-radius: 10px;
+    background: linear-gradient(
+      180deg,
+      color-mix(in oklab, var(--pulse-accent) 18%, var(--pulse-surface)),
+      color-mix(in oklab, var(--pulse-accent) 9%, var(--pulse-bg))
+    );
+    box-shadow: inset 0 1px 0 rgba(255, 240, 230, 0.06);
+    /* A step lighter than the accent, so the mark holds up on the tinted tile. */
+    color: #e07f5e;
+  }
+
+  /* An aluminium key with the mark printed on it: the prompt in ink, the pulse in signal orange. */
+  [data-theme="swiss-industrial"] .pulse-logo {
+    border: 1px solid #d1d1c7;
+    border-bottom-color: #bdbdb2;
+    border-radius: 8px;
+    background: linear-gradient(180deg, #fbfbf9 0%, #f0f0ec 100%);
+    color: var(--pulse-ink);
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.06),
+      0 2px 4px rgba(0, 0, 0, 0.03),
+      inset 0 1px 0 #ffffff;
+  }
+  [data-theme="swiss-industrial"] .pulse-logo .mark-beat {
+    stroke: var(--pulse-accent);
+  }
+
+  /* A frosted chip lit from inside, the mark glowing in the brand gradient. */
+  [data-theme="glass-bento"] .pulse-logo {
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    background:
+      radial-gradient(120% 90% at 0% 0%, rgba(139, 92, 246, 0.4), transparent 62%),
+      radial-gradient(120% 90% at 100% 100%, rgba(59, 130, 246, 0.3), transparent 62%),
+      linear-gradient(160deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.03));
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.24),
+      0 10px 24px -12px rgba(139, 92, 246, 0.65);
+  }
+  [data-theme="glass-bento"] .pulse-logo svg {
+    filter: drop-shadow(0 0 6px rgba(167, 139, 250, 0.5));
+  }
+  [data-theme="glass-bento"] .pulse-logo path {
+    stroke: url(#pulse-logo-opal);
+  }
+
+  /* Wordmark -------------------------------------------------------------- */
+  /* "Claude" set plain, "Pulse" as the voice: italic and lit with the accent. Lower-case in every theme. */
+  .pulse-wordmark {
+    line-height: 1.15;
+    color: var(--pulse-ink);
+    text-transform: lowercase;
+  }
+  .pulse-wordmark .wm-pulse {
+    /* Room for the italic overhang, which `truncate` would otherwise clip. */
+    padding-right: 0.12em;
+  }
+
+  /* Editorial: soft optical-size serif, the italic in a terracotta→amber ink. */
+  [data-theme="claude-warm"] .pulse-wordmark {
+    font-family: var(--pulse-wordmark);
+    font-size: 23px;
+    font-weight: 600;
+    letter-spacing: -0.035em;
+    font-variation-settings: "opsz" 72, "SOFT" 100, "WONK" 0;
+  }
+  [data-theme="claude-warm"] .wm-pulse {
+    font-style: italic;
+    font-weight: 430;
+    letter-spacing: -0.02em;
+    font-variation-settings: "opsz" 72, "SOFT" 100, "WONK" 1;
+    background: linear-gradient(100deg, #e8906b 0%, #d97757 45%, #e5b567 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* Instrument lockup: lower-case heavy grotesk, the second word in signal orange. */
+  /* All lower-case has no capitals to give it height, so it runs larger to sit level with the others. */
+  [data-theme="swiss-industrial"] .pulse-wordmark {
+    font-family: var(--pulse-sans);
+    font-size: 23px;
+    font-weight: 800;
+    letter-spacing: -0.06em;
+  }
+  [data-theme="swiss-industrial"] .wm-pulse {
+    padding-right: 0;
+    color: var(--pulse-accent);
+  }
+
+  /* Tight sans with a frosted top light; the italic serif carries the gradient. */
+  [data-theme="glass-bento"] .pulse-wordmark {
+    font-family: var(--pulse-sans);
+    font-size: 19px;
+    font-weight: 650;
+    letter-spacing: -0.04em;
+  }
+  [data-theme="glass-bento"] .wm-claude {
+    background: linear-gradient(180deg, #ffffff 35%, #b4b4bd 110%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  [data-theme="glass-bento"] .wm-pulse {
+    font-family: var(--pulse-wordmark);
+    font-size: 1.1em;
+    font-style: italic;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    font-variation-settings: "opsz" 72, "SOFT" 50, "WONK" 1;
+    background: linear-gradient(100deg, var(--pulse-brand-a) 0%, var(--pulse-brand-b) 45%, var(--pulse-brand-c) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .pulse-version {
+    flex-shrink: 0;
+    padding: 3px 6px;
+    font-size: 10px;
+    line-height: 1;
+    color: var(--pulse-ink-3);
+    border: 1px solid var(--pulse-line);
+    border-radius: var(--pulse-radius-pill);
+  }
+  [data-theme="swiss-industrial"] .pulse-version {
+    border-radius: 4px;
+    font-weight: 500;
+    background: var(--pulse-surface);
+    box-shadow: inset 0 1px 0 #ffffff;
+  }
+
+  /* Feed status under the wordmark; printed-legend capitals on Swiss Industrial. */
+  [data-theme="swiss-industrial"] .pulse-status {
+    font-family: var(--pulse-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  /* Block capsule in the header ------------------------------------------ */
+  .pulse-capsule {
+    border: 1px solid var(--pulse-line);
+    background: var(--pulse-surface);
+  }
+  [data-theme="claude-warm"] .pulse-capsule {
+    border-radius: 12px;
+    background: #1a1a18;
+    box-shadow: inset 0 1px 0 0 rgba(255, 236, 214, 0.035);
+  }
+  [data-theme="swiss-industrial"] .pulse-capsule {
+    border-radius: 8px;
+    background: var(--pulse-surface);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04), inset 0 1px 0 #ffffff;
+  }
+  [data-theme="glass-bento"] .pulse-capsule {
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.05);
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.1);
+  }
+
+  /* Live lamp ------------------------------------------------------------- */
+  /*
+   * A small steady lamp in a faint halo. It gives one quiet double beat
+   * ("lub-dub") when it mounts, and callers key it on the data revision, so a
+   * beat marks each new response instead of looping forever. `data-busy`
+   * keeps it beating for loading states; `data-idle` holds it still.
+   */
+  .pulse-dot {
+    --dot-c: var(--dot, var(--pulse-good));
+    position: relative;
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--dot-c);
+    box-shadow: 0 0 0 2.5px color-mix(in oklab, var(--dot-c) 18%, transparent);
+    animation: dot-beat 1s cubic-bezier(0.3, 0, 0.3, 1) both;
+  }
+  .pulse-dot::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: 0 0 0 1px var(--dot-c);
+    opacity: 0;
+    animation: dot-ripple 1.1s cubic-bezier(0.2, 0.6, 0.3, 1) 0.08s both;
+  }
+  .pulse-dot[data-busy="true"],
+  .pulse-dot[data-busy="true"]::after {
+    animation-duration: 1.6s;
+    animation-iteration-count: infinite;
+  }
+  /* Soft glass: the halo blooms into a glow. */
+  [data-theme="glass-bento"] .pulse-dot {
+    box-shadow:
+      0 0 0 2px color-mix(in oklab, var(--dot-c) 16%, transparent),
+      0 0 8px color-mix(in oklab, var(--dot-c) 55%, transparent);
+  }
+  /* An indicator lamp: domed highlight, tight glow, and a blink instead of a ripple. */
+  [data-theme="swiss-industrial"] .pulse-dot {
+    width: 7px;
+    height: 7px;
+    background:
+      radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.55), transparent 55%),
+      var(--dot-c);
+    box-shadow:
+      inset 0 -1px 1px rgba(0, 0, 0, 0.15),
+      0 0 0 2px color-mix(in oklab, var(--dot-c) 14%, transparent),
+      0 0 4px color-mix(in oklab, var(--dot-c) 40%, transparent);
+    animation-name: led-blink;
+  }
+  [data-theme="swiss-industrial"] .pulse-dot::after {
+    display: none;
+  }
+  .pulse-dot[data-idle="true"],
+  .pulse-dot[data-idle="true"]::after {
+    animation: none;
+  }
+
+  /* Tooltip shell (charts + theme switcher hints) ------------------------- */
+  .pulse-pop {
+    border: 1px solid var(--pulse-line-strong);
+    color: var(--pulse-ink);
+  }
+  [data-theme="claude-warm"] .pulse-pop {
+    background: #262624;
+    border-radius: 10px;
+    box-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.6), inset 0 1px 0 0 rgba(255, 236, 214, 0.04);
+  }
+  [data-theme="swiss-industrial"] .pulse-pop {
+    background: #fafaf8;
+    border-radius: 8px;
+    border-color: var(--pulse-line);
+    box-shadow:
+      0 14px 32px -12px rgba(17, 17, 16, 0.24),
+      0 2px 4px rgba(0, 0, 0, 0.04),
+      inset 0 1px 0 #ffffff;
+  }
+  [data-theme="glass-bento"] .pulse-pop {
+    background: rgba(24, 24, 27, 0.72);
+    border-radius: 16px;
+    border-color: rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.1), 0 16px 40px -12px rgba(0, 0, 0, 0.7);
+  }
+
+  /* Keyboard hint chips --------------------------------------------------- */
+  .pulse-kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.35rem;
+    height: 1.25rem;
+    padding: 0 0.3rem;
+    font-family: var(--pulse-mono);
+    font-size: 10px;
+    line-height: 1;
+    color: var(--pulse-ink-2);
+    border: 1px solid var(--pulse-line-strong);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    background: var(--pulse-raised);
+  }
+  [data-theme="swiss-industrial"] .pulse-kbd {
+    border-radius: 4px;
+    border-color: var(--pulse-line);
+    border-bottom-color: var(--pulse-line-strong);
+    background: var(--pulse-surface);
+    box-shadow: inset 0 1px 0 #ffffff;
+  }
+
+  /* Indicator lamp on Swiss Industrial keys and switches (see <Led>). */
+  .pulse-led {
+    width: 6px;
+    height: 6px;
+    flex-shrink: 0;
+    border-radius: 999px;
+    background: #c4c4ba;
+    box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.22), 0 1px 0 rgba(255, 255, 255, 0.9);
+    transition: background 200ms ease, box-shadow 200ms ease;
+  }
+  .pulse-led[data-on="true"] {
+    background: radial-gradient(circle at 35% 30%, #ffd5c2 0 15%, #ff4f00 62%);
+    box-shadow: 0 0 0 2px rgba(255, 79, 0, 0.14), 0 0 6px 1px rgba(255, 79, 0, 0.55);
+  }
+}
+
+/* ── Recharts per-theme polish ─────────────────────────────────────────── */
+.recharts-surface:focus,
+.recharts-wrapper:focus,
+.recharts-wrapper *:focus {
+  outline: none;
+}
+
+/* ── Swiss Industrial hardware ─────────────────────────────────────────── */
+/* Used through the variant: `swiss:key-cap swiss:active:key-pressed`, `swiss:groove`. */
+@utility key-cap {
+  background-color: #f9f9f7;
+  border: 1px solid #d1d1c7;
+  border-bottom-color: #bdbdb2;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.06),
+    0 2px 4px rgba(0, 0, 0, 0.03),
+    inset 0 1px 0 #ffffff;
+}
+@utility key-pressed {
+  background-color: #ecece8;
+  border: 1px solid #c9c9bf;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.1), 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+@utility groove {
+  background-color: #dfdfda;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.09), 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+/* ── Backdrops ─────────────────────────────────────────────────────────── */
+.pulse-backdrop {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 0;
+}
+.pulse-backdrop > * {
+  display: none;
+}
+[data-theme="claude-warm"] .pulse-backdrop > .bd-warm,
+[data-theme="swiss-industrial"] .pulse-backdrop > .bd-swiss,
+[data-theme="glass-bento"] .pulse-backdrop > .bd-glass {
+  display: block;
+}
+
+.bd-warm {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(900px 480px at 8% -8%, rgba(217, 119, 87, 0.07), transparent 65%),
+    radial-gradient(700px 420px at 100% 110%, rgba(229, 181, 103, 0.04), transparent 70%);
+}
+/* Parchment grain. */
+.bd-warm::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.06;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 0.9  0 0 0 0 0.8  0 0 0 1 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Bead-blasted aluminium: a soft top light over a fine matte grain. */
+.bd-swiss {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(1200px 520px at 50% -14%, rgba(255, 255, 255, 0.75), transparent 70%),
+    linear-gradient(180deg, #ecece8 0%, #e7e7e2 100%);
+}
+.bd-swiss::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.1;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.1' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.2  0 0 0 0 0.2  0 0 0 0 0.18  0 0 0 0.6 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.bd-glass {
+  position: absolute;
+  inset: 0;
+}
+.bd-glass .orb {
+  position: absolute;
+  border-radius: 999px;
+  filter: blur(120px);
+  animation: orb-drift 26s ease-in-out infinite alternate;
+}
+
+/* ── Mini HUD ──────────────────────────────────────────────────────────── */
+/* The window itself is 320×140: never show page scrollbars. */
+html[data-view="mini"],
+html[data-view="mini"] body {
+  overflow: hidden;
+}
+
+/* Today's total flashes when a new response lands. */
+.hud-bump {
+  transform-origin: left bottom;
+  animation: hud-bump 900ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes hud-bump {
+  0% {
+    color: var(--pulse-accent);
+    text-shadow: 0 0 14px color-mix(in oklab, var(--pulse-accent) 70%, transparent);
+    transform: scale(1.06);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+@keyframes dot-beat {
+  0%,
+  28%,
+  60%,
+  100% {
+    transform: scale(1);
+  }
+  14% {
+    transform: scale(1.3);
+  }
+  42% {
+    transform: scale(1.15);
+  }
+}
+
+@keyframes dot-ripple {
+  0% {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.4);
+  }
+}
+
+@keyframes led-blink {
+  0%,
+  60%,
+  100% {
+    filter: none;
+  }
+  12% {
+    filter: brightness(1.45) saturate(1.15);
+  }
+  26% {
+    filter: brightness(0.8);
+  }
+  40% {
+    filter: brightness(1.3);
+  }
+}
+
+@keyframes orb-drift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(4%, 6%, 0) scale(1.12);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
