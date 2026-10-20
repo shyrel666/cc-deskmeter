@@ -1,5 +1,5 @@
-//! Watches the transcript directory and pushes fresh usage data to the
-//! frontend as the `token-updated` event.
+//! Watches every transcript root and pushes fresh usage data to the
+//! frontend as the `token-updated` event, and to the tray icon.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -11,14 +11,16 @@ use chrono::Utc;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::{AppHandle, Emitter};
 
-use crate::usage::{self, UsageStore};
+use crate::tray;
+use crate::usage::{self, UsageData, UsageStore};
 
 pub const USAGE_EVENT: &str = "token-updated";
 
 /// Claude Code appends several lines per response; coalesce them into one update.
 const DEBOUNCE: Duration = Duration::from_millis(400);
 /// Re-emit periodically so the block countdown, burn rate and "today" stay
-/// current without file activity. Also retries a watcher that failed to start.
+/// current without file activity. Also retries watchers that failed to start
+/// or whose root does not exist yet.
 const TICK: Duration = Duration::from_secs(30);
 /// Full integrity checks are independent of notifications and never hash a
 /// transcript while holding the store lock. Each pass audits the transcripts
@@ -47,38 +49,37 @@ pub fn spawn(app: AppHandle, store: Arc<Mutex<UsageStore>>) {
                             .apply_validation(result)
                             .then(|| store.snapshot(Utc::now()))
                     };
-                    if let Some(data) = data
-                        && let Err(err) = validator_app.emit(USAGE_EVENT, &data)
-                    {
-                        eprintln!("claude-pulse: failed to emit {USAGE_EVENT}: {err}");
+                    if let Some(data) = data {
+                        emit(&validator_app, &data);
                     }
                 }
             }
         })
     {
-        eprintln!("claude-pulse: failed to start usage validator: {err}");
+        eprintln!("cc-deskmeter: failed to start usage validator: {err}");
     }
     let spawned = std::thread::Builder::new()
         .name("usage-watcher".into())
         .spawn(move || run(&app, &store));
     if let Err(err) = spawned {
-        eprintln!("claude-pulse: failed to start usage watcher: {err}");
+        eprintln!("cc-deskmeter: failed to start usage watcher: {err}");
     }
 }
 
 fn run(app: &AppHandle, store: &Mutex<UsageStore>) {
-    let root = usage::lock(store).root().map(Path::to_path_buf);
+    let roots = usage::lock(store).roots().to_vec();
     let (tx, rx) = mpsc::channel::<NotifyResult>();
-    let mut watcher: Option<RecommendedWatcher> = None;
+    // One watcher per root, so each comes and goes with its own folder.
+    let mut watchers: Vec<Option<RecommendedWatcher>> = roots.iter().map(|_| None).collect();
     let mut last_generation = None;
 
     publish(app, store, &mut last_generation, true, &HashSet::new());
     let mut next_tick = Instant::now() + TICK;
     loop {
-        if watcher.is_none() {
-            watcher = root
-                .as_deref()
-                .and_then(|root| start_watcher(root, tx.clone()));
+        for (root, watcher) in roots.iter().zip(&mut watchers) {
+            if watcher.is_none() {
+                *watcher = start_watcher(root, tx.clone());
+            }
         }
         let Ok(update) = wait_for_update(&rx, &mut next_tick, TICK, DEBOUNCE) else {
             return;
@@ -92,9 +93,11 @@ fn run(app: &AppHandle, store: &Mutex<UsageStore>) {
                 &update.paths,
             );
         }
-        if root.as_deref().is_some_and(|root| !root.is_dir()) {
-            // The watched directory went away; re-create the watcher once it is back.
-            watcher = None;
+        for (root, watcher) in roots.iter().zip(&mut watchers) {
+            if !root.is_dir() {
+                // The watched directory went away; re-create the watcher once it is back.
+                *watcher = None;
+            }
         }
     }
 }
@@ -161,7 +164,7 @@ fn start_watcher(root: &Path, tx: mpsc::Sender<NotifyResult>) -> Option<Recommen
     match result {
         Ok(watcher) => Some(watcher),
         Err(err) => {
-            eprintln!("claude-pulse: cannot watch {}: {err}", root.display());
+            eprintln!("cc-deskmeter: cannot watch {}: {err}", root.display());
             None
         }
     }
@@ -173,7 +176,7 @@ fn is_relevant(event: &NotifyResult) -> bool {
     match event {
         Ok(event) => !matches!(event.kind, EventKind::Access(_)),
         Err(err) => {
-            eprintln!("claude-pulse: watch error: {err}");
+            eprintln!("cc-deskmeter: watch error: {err}");
             true
         }
     }
@@ -203,8 +206,13 @@ fn publish(
         *last_generation = Some(generation);
         store.snapshot(Utc::now())
     };
-    if let Err(err) = app.emit(USAGE_EVENT, &data) {
-        eprintln!("claude-pulse: failed to emit {USAGE_EVENT}: {err}");
+    emit(app, &data);
+}
+
+fn emit(app: &AppHandle, data: &UsageData) {
+    tray::push(app, data);
+    if let Err(err) = app.emit(USAGE_EVENT, data) {
+        eprintln!("cc-deskmeter: failed to emit {USAGE_EVENT}: {err}");
     }
 }
 

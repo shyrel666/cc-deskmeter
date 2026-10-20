@@ -58,7 +58,9 @@ jobs:
 
             The installers are not code-signed yet:
             - **Windows**: if SmartScreen says "Windows protected your PC", click **More info → Run anyway**.
-            - **macOS**: if the app "is damaged" or "can't be opened", move it to Applications and run `xattr -cr /Applications/claude-pulse.app` once.
+            - **macOS**: if the app "is damaged" or "can't be opened", move it to Applications and run `xattr -cr /Applications/cc-deskmeter.app` once.
+
+            **Upgrading from Claude Pulse (v0.1.0)?** The app was renamed, so its installer does not replace the old one. Uninstall Claude Pulse first (Windows: **Settings → Apps → claude-pulse → Uninstall**, leaving **Delete the application data** unticked, since CC-Deskmeter keeps its settings and history in the same folder; macOS: delete `claude-pulse.app` from Applications). The `.deb` and `.rpm` packages replace it on their own.
 
             ## 下载
 
@@ -70,12 +72,17 @@ jobs:
 
             安装包暂未签名：
             - **Windows**：如果 SmartScreen 提示「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」。
-            - **macOS**：如果提示应用「已损坏」或「无法打开」，先拖进「应用程序」，再执行一次 `xattr -cr /Applications/claude-pulse.app`。
+            - **macOS**：如果提示应用「已损坏」或「无法打开」，先拖进「应用程序」，再执行一次 `xattr -cr /Applications/cc-deskmeter.app`。
+
+            **从 Claude Pulse（v0.1.0）升级？** 应用已更名，新安装包不会覆盖旧版。请先卸载 Claude Pulse（Windows：「设置 → 应用 → claude-pulse → 卸载」，不要勾选「删除应用程序数据」，因为 CC-Deskmeter 的设置和历史归档也存放在同一个文件夹里；macOS：从「应用程序」中删除 `claude-pulse.app`）。`.deb` 和 `.rpm` 包会自动替换旧版。
         run: |
-          # Hand-written notes in docs/release-<tag>.md replace the default body.
+          # Hand-written notes in docs/release-<tag>.md replace the default body,
+          # and GitHub's generated notes are left off so they stand alone.
           notes="docs/release-$GITHUB_REF_NAME.md"
+          generate=true
           if [ -f "$notes" ]; then
             BODY=$(cat "$notes")
+            generate=false
           fi
           # A re-run reuses the release this tag already has.
           id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
@@ -85,11 +92,11 @@ jobs:
             case "$GITHUB_REF_NAME" in *-*) prerelease=true ;; esac
             id=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
               -f tag_name="$GITHUB_REF_NAME" \
-              -f name="Claude Pulse $GITHUB_REF_NAME" \
+              -f name="CC-Deskmeter $GITHUB_REF_NAME" \
               -f body="$BODY" \
               -F draft=true \
               -F prerelease="$prerelease" \
-              -F generate_release_notes=true \
+              -F generate_release_notes="$generate" \
               --jq .id)
           fi
           echo "id=$id" >> "$GITHUB_OUTPUT"
@@ -116,11 +123,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The tray library found here becomes the .deb/.rpm dependency and is
+      # copied into the AppImage. Ayatana is the maintained one, packaged by
+      # every current distribution (Debian 12 no longer has libappindicator3-1).
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - uses: actions/setup-node@v7
         with:

@@ -5,7 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 export const APP_VERSION = __APP_VERSION__;
 
 /** Project home. The opener capability only lets the app open URLs under it. */
-export const REPO_URL = "https://github.com/shyrel666/claude-pulse";
+export const REPO_URL = "https://github.com/shyrel666/cc-deskmeter";
 /** GitHub redirects this to the newest release, so "Check for updates" needs no request of our own. */
 export const RELEASES_URL = `${REPO_URL}/releases/latest`;
 export const ISSUES_URL = `${REPO_URL}/issues`;

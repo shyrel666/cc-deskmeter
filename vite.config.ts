@@ -15,6 +15,13 @@ export default defineConfig(() => ({
     __APP_VERSION__: JSON.stringify(tauriConf.version),
   },
 
+  // The dashboard, and the tray icon's panel (a window of its own on Windows).
+  build: {
+    rolldownOptions: {
+      input: { main: "index.html", tray: "tray.html" },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

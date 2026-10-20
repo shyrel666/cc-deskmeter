@@ -1,9 +1,12 @@
-//! Incremental reader for `~/.claude/projects/**/*.jsonl`.
+//! Incremental reader for `<root>/**/*.jsonl` across every discovered
+//! transcript root (see `paths`).
 //!
 //! Appends check bounded head/tail samples and read only new bytes. Full prefix
 //! checks run off the store lock in the background; manual rescans reparse all
 //! files. Truncations, replacements and detected rewrites rebuild their index.
+//! An optional archive (`open_archive`) keeps aggregates once transcripts go.
 
+use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{File, Metadata};
@@ -17,9 +20,12 @@ use serde::de::IgnoredAny;
 use walkdir::WalkDir;
 
 use super::aggregate::{History, ProjectMeta};
+use super::archive::{self, Archive};
 use super::parser::{self, ParsedUsage, RecordContext};
-use super::pricing;
-use super::types::{ReadError, UsageData, UsageEntry};
+use super::paths::Roots;
+use super::pricing::{self, Pricing};
+use super::quota::{self, LocalBlock, PercentPerUsd, QuotaSource, Sample, Spend};
+use super::types::{ArchiveSummary, ReadError, TokenCounts, UsageData, UsageEntry};
 
 /// Parent links kept per transcript. A response's chain reaches back only to
 /// the prompt or tool result that sent it (at most 4 records in real logs);
@@ -32,7 +38,7 @@ pub fn lock(store: &Mutex<UsageStore>) -> MutexGuard<'_, UsageStore> {
 }
 
 pub struct UsageStore {
-    root: Option<PathBuf>,
+    roots: Roots,
     files: HashMap<PathBuf, FileState>,
     /// Bumped whenever usage, file metadata displayed by the UI or read health changes.
     generation: u64,
@@ -40,28 +46,80 @@ pub struct UsageStore {
     history: History,
     project_meta: HashMap<Arc<str>, ProjectMeta>,
     read_errors: BTreeMap<PathBuf, String>,
+    pricing: Pricing,
+    /// Optional local price overrides; `None` uses the built-in table only.
+    pricing_file: Option<PathBuf>,
+    /// Metadata of `pricing_file` at its last completed read, `Some(None)`
+    /// while it is absent. `None` makes the next refresh read it.
+    pricing_stamp: Option<Option<FileStamp>>,
+    pricing_error: Option<String>,
+    quota: QuotaSource,
+    /// The quota estimate's spend and fit as of the last snapshot.
+    quota_fit: Option<QuotaFit>,
+    /// Usage and weekly-limit readings kept beyond the transcripts and
+    /// Desktop's own log; `None` until `open_archive`.
+    archive: Option<Archive>,
+    /// `(start of today, end of the latest ended block)` when the archive
+    /// last took in the finished days and blocks.
+    archived_through: Option<(DateTime<Utc>, Option<DateTime<Utc>>)>,
+    /// The archive has not seen Desktop's current samples yet.
+    readings_due: bool,
 }
 
 impl UsageStore {
-    pub fn new(root: Option<PathBuf>) -> Self {
+    pub fn new(roots: Roots) -> Self {
         Self {
-            root,
+            roots,
             files: HashMap::new(),
             generation: 0,
             snapshot_id: 0,
             history: History::default(),
             project_meta: HashMap::new(),
             read_errors: BTreeMap::new(),
+            pricing: Pricing::default(),
+            pricing_file: None,
+            pricing_stamp: None,
+            pricing_error: None,
+            quota: QuotaSource::default(),
+            quota_fit: None,
+            archive: None,
+            archived_through: None,
+            readings_due: false,
         }
     }
 
-    /// `~/.claude/projects` on every platform.
-    pub fn default_root() -> Option<PathBuf> {
-        dirs::home_dir().map(|home| home.join(".claude").join("projects"))
+    /// Keeps an aggregates-only archive in `dir` (see `archive`) and merges
+    /// it into every snapshot from now on. Cheap before the first refresh,
+    /// which then does the initial scan.
+    pub fn open_archive(&mut self, dir: PathBuf) {
+        // Local prices first, so the archive's costs are checked against them.
+        self.reload_pricing();
+        let archive = Archive::open(dir, &self.pricing);
+        self.history.set_archive(&archive, &self.pricing);
+        self.archive = Some(archive);
+        self.archived_through = None;
+        self.readings_due = true;
+        self.project_meta = self.project_meta();
+        self.generation += 1;
     }
 
-    pub fn root(&self) -> Option<&Path> {
-        self.root.as_deref()
+    /// Reads Claude Desktop's plan usage samples from the newest of `paths` on
+    /// every snapshot (cheap when unchanged); none existing leaves the quota out.
+    pub fn with_quota_files(mut self, paths: Vec<PathBuf>) -> Self {
+        self.quota = QuotaSource::new(paths);
+        self
+    }
+
+    /// Reads local price overrides from `path`, if it exists, on every full
+    /// refresh (so edits apply within one tick) and on every rescan. New
+    /// prices reprice what was read already, without reading it again.
+    pub fn with_pricing_file(mut self, path: Option<PathBuf>) -> Self {
+        self.pricing_file = path;
+        self
+    }
+
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots.dirs
     }
 
     pub fn generation(&self) -> u64 {
@@ -69,9 +127,10 @@ impl UsageStore {
     }
 
     /// Picks up new lines, new files and deleted files. Returns whether any
-    /// usage entry was added or removed.
+    /// usage entry was added or removed, or prices changed.
     pub fn refresh(&mut self) -> bool {
-        self.refresh_inner(false, &HashSet::new())
+        let repriced = self.reload_pricing();
+        self.refresh_inner(false, &HashSet::new()) || repriced
     }
 
     /// Inspect only notified files/subtrees, including removals. Equal-length
@@ -81,7 +140,93 @@ impl UsageStore {
     }
 
     pub fn rescan(&mut self) -> bool {
-        self.refresh_inner(true, &HashSet::new())
+        let repriced = self.reload_pricing();
+        self.refresh_inner(true, &HashSet::new()) || repriced
+    }
+
+    /// Re-reads the overrides when the file appeared, changed or went away,
+    /// or when the last read failed. Returns whether prices changed, and so
+    /// every cost (see `reprice`). An unreadable or invalid file keeps the
+    /// last valid prices.
+    fn reload_pricing(&mut self) -> bool {
+        let Some(path) = self.pricing_file.as_deref() else {
+            return false;
+        };
+        let stamp = std::fs::metadata(path)
+            .ok()
+            .map(|meta| FileStamp::from(&meta));
+        if self.pricing_stamp.as_ref() == Some(&stamp) {
+            return false;
+        }
+        let read = std::fs::read_to_string(path);
+        // A read error can pass without touching the metadata (a sharing
+        // violation, a permission fixed with chmod), so it is retried on the
+        // next refresh. Invalid content waits for the file to change.
+        self.pricing_stamp = match &read {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => None,
+            _ => Some(stamp),
+        };
+        let loaded = match read {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Pricing::default()),
+            Err(err) => Err(err.to_string()),
+            Ok(text) => Pricing::parse(&text),
+        };
+        let (pricing, error) = match loaded {
+            Ok(pricing) => (pricing, None),
+            Err(err) => (self.pricing.clone(), Some(err)),
+        };
+        if error != self.pricing_error {
+            // Logged once per distinct error, not on every retry.
+            if let Some(err) = &error {
+                eprintln!("cc-deskmeter: ignoring {}: {err}", path.display());
+            }
+            self.pricing_error = error;
+            self.generation += 1;
+        }
+        if pricing == self.pricing {
+            return false;
+        }
+        self.pricing = pricing;
+        self.reprice();
+        true
+    }
+
+    /// Recomputes every cost at `self.pricing` from the responses already
+    /// read. Nothing is read again, so a transcript that cannot be opened
+    /// right now is repriced too, and the archive (repriced from its tokens,
+    /// then merged again) never records prices that some costs do not match.
+    fn reprice(&mut self) {
+        for state in self.files.values_mut() {
+            for entry in state.entries.values_mut() {
+                let price = price_of(
+                    &self.pricing,
+                    &entry.model,
+                    &entry.tokens,
+                    entry.cache_write_1h,
+                    entry.fast,
+                );
+                if !price.matches(entry) {
+                    *entry = Arc::new(price.apply(UsageEntry::clone(entry)));
+                }
+            }
+        }
+        if let Some(archive) = &mut self.archive {
+            archive.reprice(&self.pricing);
+        }
+        self.rebuild_history();
+        self.archived_through = None;
+        self.generation += 1;
+    }
+
+    /// Indexes every response read so far afresh, merged with the archive.
+    fn rebuild_history(&mut self) {
+        self.history = History::default();
+        if let Some(archive) = &self.archive {
+            self.history.set_archive(archive, &self.pricing);
+        }
+        for entry in self.files.values().flat_map(|state| state.entries.values()) {
+            self.history.insert(Arc::clone(entry), &Local);
+        }
     }
 
     /// Capture small, immutable jobs; callers must release the store lock
@@ -132,15 +277,20 @@ impl UsageStore {
     }
 
     fn refresh_inner(&mut self, force: bool, paths: &HashSet<PathBuf>) -> bool {
-        let Some(root) = self.root.clone() else {
-            return false;
+        let roots = self.roots.dirs.clone();
+        // The innermost root a path lies under, should one root contain another.
+        let root_of = |path: &Path| {
+            roots
+                .iter()
+                .filter(|root| path.starts_with(root))
+                .max_by_key(|root| root.components().count())
         };
         let mut candidates: Vec<_> = if paths.is_empty() {
-            vec![root.clone()]
+            roots.clone()
         } else {
             paths
                 .iter()
-                .filter(|p| p.starts_with(&root))
+                .filter(|p| root_of(p).is_some())
                 .cloned()
                 .collect()
         };
@@ -163,7 +313,13 @@ impl UsageStore {
         let mut complete_scan = true;
         let previous_file_count = self.files.len();
 
-        for item in scopes.iter().flat_map(WalkDir::new) {
+        let walks = scopes.iter().flat_map(|scope| {
+            let root = root_of(scope).expect("scopes lie under a root");
+            WalkDir::new(scope)
+                .into_iter()
+                .map(move |item| (root, item))
+        });
+        for (root, item) in walks {
             let item = match item {
                 Ok(item) => item,
                 Err(err) => {
@@ -174,9 +330,9 @@ impl UsageStore {
                         .is_none_or(|e| e.kind() != io::ErrorKind::NotFound)
                     {
                         complete_scan = false;
-                        eprintln!("claude-pulse: failed to enumerate transcripts: {err}");
+                        eprintln!("cc-deskmeter: failed to enumerate transcripts: {err}");
                         self.read_errors
-                            .insert(err.path().unwrap_or(&root).to_path_buf(), err.to_string());
+                            .insert(err.path().unwrap_or(root).to_path_buf(), err.to_string());
                     }
                     continue;
                 }
@@ -199,7 +355,7 @@ impl UsageStore {
             // event (a child created or removed) leaves its other files to the
             // stamp; rehashing them would reread the whole project folder.
             let notified = paths.contains(&path);
-            let (added, reset) = self.ingest(&root, &path, &meta, force, notified);
+            let (added, reset) = self.ingest(root, &path, &meta, force, notified);
             changed |= added;
             rebuild |= reset;
             seen.insert(path);
@@ -216,10 +372,7 @@ impl UsageStore {
             || previous_file_count != self.files.len()
             || self.read_errors != previous_errors;
         if rebuild {
-            self.history = History::default();
-            for entry in self.files.values().flat_map(|state| state.entries.values()) {
-                self.history.insert(Arc::clone(entry), &Local);
-            }
+            self.rebuild_history();
         }
         if changed {
             self.generation += 1;
@@ -230,19 +383,172 @@ impl UsageStore {
 
     pub fn snapshot(&mut self, now: DateTime<Utc>) -> UsageData {
         let mut data = self.history.snapshot(&self.project_meta, now, &Local);
+        self.update_archive(now);
         self.snapshot_id += 1;
         data.snapshot_id = self.snapshot_id;
-        data.data_dir = self.root.as_ref().map(|root| root.display().to_string());
+        data.data_dirs = self.roots.display();
         data.file_count = self.files.len();
+        data.custom_prices = self.pricing.custom_count();
+        data.cache_read_price = self.pricing.cache_read_share(
+            data.models
+                .iter()
+                .map(|m| (m.model.as_str(), m.usage.cache_read_tokens)),
+        );
+        data.pricing_error = self.pricing_error.clone();
         data.read_errors = self
-            .read_errors
-            .iter()
-            .map(|(path, message)| ReadError {
+            .roots
+            .problem()
+            .into_iter()
+            .chain(self.read_errors.iter().map(|(path, message)| ReadError {
                 path: path.display().to_string(),
                 message: message.clone(),
-            })
+            }))
             .collect();
+        data.quota = self.quota_status(
+            data.active_block
+                .as_ref()
+                .map(|b| (b.start_time, b.end_time)),
+            now,
+        );
+        if let Some(archive) = &mut self.archive {
+            archive.save();
+            data.archive = Some(archive.status(self.history.filled_responses()));
+        }
         data
+    }
+
+    /// What the archive view shows beyond the snapshot, as of the last refresh.
+    pub fn archive_summary(&mut self, now: DateTime<Utc>) -> ArchiveSummary {
+        let (restored, blocks) = self.history.archive_view(now, &Local);
+        ArchiveSummary {
+            generated_at: now,
+            daily: self.history.daily_history(now, &Local),
+            restored,
+            blocks,
+            files: self
+                .archive
+                .as_ref()
+                .map(Archive::files)
+                .unwrap_or_default(),
+            reveal_path: self
+                .archive
+                .as_ref()
+                .map(|archive| archive.reveal_path().display().to_string()),
+            retention_days: self.roots.retention_days(),
+        }
+    }
+
+    /// Brings the archive up to date once a day or a block has ended, and
+    /// when responses changed before the latest one did. Call after the
+    /// history's snapshot.
+    fn update_archive(&mut self, now: DateTime<Utc>) {
+        let Some(archive) = &mut self.archive else {
+            return;
+        };
+        let today_start = archive::day_start(now.with_timezone(&Local).date_naive(), &Local);
+        let last_ended = self.history.last_ended_block_end(now);
+        let frontier = last_ended.map_or(today_start, |end| end.max(today_start));
+        let changed = self.history.take_earliest_change();
+        if self.archived_through == Some((today_start, last_ended))
+            && changed.is_none_or(|at| at >= frontier)
+        {
+            return;
+        }
+        self.archived_through = Some((today_start, last_ended));
+        let days = archive::merge_days(archive.days(), self.history.entries(), now, &Local);
+        let blocks = archive::merge_blocks(archive.blocks(), self.history.ended_blocks(now));
+        // The merge reproduces what the history shows, so this snapshot stands.
+        if archive.update_usage(days, blocks, &self.project_meta, &self.pricing) {
+            self.history.set_archive(archive, &self.pricing);
+        }
+    }
+
+    fn quota_status(
+        &mut self,
+        open_block: Option<(DateTime<Utc>, DateTime<Utc>)>,
+        now: DateTime<Utc>,
+    ) -> Option<quota::QuotaStatus> {
+        let reloaded = self.quota.reload();
+        // With an archive, Desktop's samples join the archived readings, which
+        // also outlast them; the estimate reads the last week of those.
+        let mut account = None;
+        let samples: Cow<'_, [Sample]> = match &mut self.archive {
+            None => Cow::Borrowed(self.quota.samples()),
+            Some(archive) => {
+                if (reloaded || self.readings_due)
+                    && let Some(tag) = self.quota.account()
+                {
+                    archive.add_readings(tag, self.quota.samples(), now);
+                }
+                self.readings_due = false;
+                let tag = self
+                    .quota
+                    .account()
+                    .or_else(|| archive.latest_account())?
+                    .to_owned();
+                let samples = archive.recent_samples(&tag, now);
+                account = Some(tag);
+                Cow::Owned(samples)
+            }
+        };
+        let first = samples.first()?.at;
+        // Calibration needs the sampled period; the pace needs the open block.
+        let since = open_block.map_or(first, |(start, _)| start.min(first));
+        let fit = QuotaFit::update(
+            self.quota_fit.take(),
+            self.generation,
+            since,
+            samples,
+            &self.history,
+        );
+        let fit = self.quota_fit.insert(fit);
+        let block = open_block.map(|(start, end)| LocalBlock { start, end });
+        let last_end = self.history.last_block().map(|(_, end)| end);
+        let archived = match (&self.archive, &account) {
+            (Some(archive), Some(tag)) => archive.calibration(tag, now),
+            _ => PercentPerUsd::default(),
+        };
+        let mut status = quota::estimate(
+            &fit.samples,
+            &fit.spend,
+            fit.fitted,
+            block,
+            last_end,
+            archived,
+            now,
+        )?;
+        if let (Some(archive), Some(tag)) = (&mut self.archive, &account) {
+            archive.record_calibration(tag, status.fitted, status.sampled_at);
+        }
+        if let Some(week) = status.week.as_mut() {
+            self.attribute_week(week);
+        }
+        Some(status)
+    }
+
+    /// This machine's spend since the weekly period began, in percentage
+    /// points of the weekly limit, per project and per model.
+    fn attribute_week(&self, week: &mut quota::WeekStatus) {
+        let Some(k) = week.percent_per_usd else {
+            return;
+        };
+        let (projects, models) = self.history.quota_spend_by_source(week.period_start);
+        week.projects = quota::week_shares(
+            projects.into_iter().map(|(id, usd)| {
+                let name = self
+                    .project_meta
+                    .get(&id)
+                    .map_or_else(|| id.to_string(), |meta| meta.name.clone());
+                (id.to_string(), name, usd)
+            }),
+            k,
+        );
+        week.models = quota::week_shares(
+            models
+                .into_iter()
+                .map(|(model, usd)| (model.clone(), model, usd)),
+            k,
+        );
     }
 
     fn ingest(
@@ -264,6 +570,7 @@ impl UsageStore {
         let mut changed = false;
         let mut reset = false;
         let history = &mut self.history;
+        let pricing = &self.pricing;
         let result = (|| -> io::Result<()> {
             // Open before clearing anything, preserving cached usage if a
             // temporary sharing/permission error prevents reading the file.
@@ -290,7 +597,12 @@ impl UsageStore {
                 let mut replacement = FileState::new(root, path);
                 let mut replacement_changed = false;
                 replacement.stamp = Some(stamp);
-                replacement.read_new_lines(&mut file, &mut |_| {}, &mut replacement_changed)?;
+                replacement.read_new_lines(
+                    &mut file,
+                    pricing,
+                    &mut |_| {},
+                    &mut replacement_changed,
+                )?;
                 replacement.verified = replacement.offset;
                 replacement.anchors = Some(prefix_anchors(&mut file, replacement.offset)?);
                 reset = !state.entries.is_empty() || !replacement.entries.is_empty();
@@ -303,6 +615,7 @@ impl UsageStore {
                 // later read fails; don't retain superseded streaming chunks.
                 state.read_new_lines(
                     &mut file,
+                    pricing,
                     &mut |entry| {
                         history.insert(entry, &Local);
                     },
@@ -317,15 +630,28 @@ impl UsageStore {
         })();
         state.failed = result.is_err();
         if let Err(err) = result {
-            eprintln!("claude-pulse: failed to read {}: {err}", path.display());
+            eprintln!("cc-deskmeter: failed to read {}: {err}", path.display());
             self.read_errors.insert(path.to_path_buf(), err.to_string());
         }
         (changed, reset)
     }
 
     /// Display name and path per project folder. Prefers a `cwd` that maps back
-    /// to the folder name exactly, then the shortest (closest to the root).
+    /// to the folder name exactly, then the shortest (closest to the root);
+    /// the archive names projects whose transcripts are gone.
     fn project_meta(&self) -> HashMap<Arc<str>, ProjectMeta> {
+        let mut meta = self.live_project_meta();
+        if let Some(archive) = &self.archive {
+            for (id, info) in archive.projects() {
+                if !meta.contains_key(id.as_str()) {
+                    meta.insert(Arc::from(id.as_str()), info.clone());
+                }
+            }
+        }
+        meta
+    }
+
+    fn live_project_meta(&self) -> HashMap<Arc<str>, ProjectMeta> {
         let mut best: HashMap<Arc<str>, (&str, bool)> = HashMap::new();
         for state in self.files.values() {
             let Some(cwd) = state.cwd.as_deref() else {
@@ -362,6 +688,48 @@ impl UsageStore {
                 (project, meta)
             })
             .collect()
+    }
+}
+
+/// What the quota estimate keeps between snapshots: the quota spend since
+/// the readings began (collecting and sorting a week of responses is the
+/// costly part) and `k` fitted on it. The spend holds while usage (the
+/// store's generation) and its window (`since`) stay; the fit while the
+/// readings stay too. Only the rest of the estimate depends on the time.
+struct QuotaFit {
+    generation: u64,
+    since: DateTime<Utc>,
+    spend: Arc<Spend>,
+    samples: Vec<Sample>,
+    fitted: PercentPerUsd,
+}
+
+impl QuotaFit {
+    /// `cached` if it still holds for these inputs; otherwise fitted again,
+    /// on its spend if only the readings changed.
+    fn update(
+        cached: Option<Self>,
+        generation: u64,
+        since: DateTime<Utc>,
+        samples: Cow<'_, [Sample]>,
+        history: &History,
+    ) -> Self {
+        let spend = match cached {
+            Some(fit) if fit.generation == generation && fit.since == since => {
+                if fit.samples[..] == samples[..] {
+                    return fit;
+                }
+                fit.spend
+            }
+            _ => Arc::new(Spend::new(history.quota_spend_since(since))),
+        };
+        Self {
+            generation,
+            since,
+            fitted: quota::fit(&samples, &spend),
+            spend,
+            samples: samples.into_owned(),
+        }
     }
 }
 
@@ -514,6 +882,7 @@ impl FileState {
     fn read_new_lines(
         &mut self,
         file: &mut File,
+        pricing: &Pricing,
         on_entry: &mut impl FnMut(Arc<UsageEntry>),
         changed: &mut bool,
     ) -> io::Result<()> {
@@ -532,7 +901,7 @@ impl FileState {
             if !complete {
                 break;
             }
-            *changed |= self.ingest_line(&line, on_entry);
+            *changed |= self.ingest_line(&line, pricing, on_entry);
             self.checksum.update(&line);
             self.offset += read as u64;
         }
@@ -540,7 +909,12 @@ impl FileState {
     }
 
     /// `self.offset` must still point at the start of `line`.
-    fn ingest_line(&mut self, line: &[u8], on_entry: &mut impl FnMut(Arc<UsageEntry>)) -> bool {
+    fn ingest_line(
+        &mut self,
+        line: &[u8],
+        pricing: &Pricing,
+        on_entry: &mut impl FnMut(Arc<UsageEntry>),
+    ) -> bool {
         let Ok(line) = std::str::from_utf8(line) else {
             return false;
         };
@@ -558,7 +932,7 @@ impl FileState {
             timestamp: Some(parsed.timestamp),
         });
         let meta_changed = parsed.cwd.as_deref().is_some_and(|cwd| self.note_cwd(cwd));
-        let entry = self.to_entry(parsed);
+        let entry = self.to_entry(parsed, pricing);
         if self
             .entries
             .get(&entry.dedup_key)
@@ -637,12 +1011,15 @@ impl FileState {
         false
     }
 
-    fn to_entry(&self, parsed: ParsedUsage) -> UsageEntry {
+    fn to_entry(&self, parsed: ParsedUsage, pricing: &Pricing) -> UsageEntry {
         let request_time = self.request_time(&parsed);
-        let rates = pricing::rates_for(&parsed.model);
-        let cost_usd = rates.map_or(0.0, |rates| {
-            pricing::cost_usd(&rates, &parsed.tokens, parsed.cache_write_1h, parsed.fast)
-        });
+        let price = price_of(
+            pricing,
+            &parsed.model,
+            &parsed.tokens,
+            parsed.cache_write_1h,
+            parsed.fast,
+        );
         // CLAUDE.md: deduplicate by `message.id`. Lines without one fall back to
         // `requestId`, then to their byte position so they are never merged.
         let dedup_key: Arc<str> = parsed
@@ -658,7 +1035,7 @@ impl FileState {
         }
         .min(parsed.timestamp);
 
-        UsageEntry {
+        price.apply(UsageEntry {
             dedup_key,
             source: Arc::clone(&self.source),
             offset: self.offset,
@@ -671,9 +1048,74 @@ impl FileState {
                 .session_id
                 .unwrap_or_else(|| self.fallback_session.clone()),
             tokens: parsed.tokens,
-            cost_usd,
-            priced: rates.is_some(),
+            cache_write_1h: parsed.cache_write_1h,
+            fast: parsed.fast,
+            long_context: false,
+            cost_usd: 0.0,
+            quota_usd: 0.0,
+            priced: false,
+        })
+    }
+}
+
+/// The priced fields of a response, at some prices.
+struct Price {
+    long_context: bool,
+    cost_usd: f64,
+    quota_usd: f64,
+    priced: bool,
+}
+
+impl Price {
+    fn matches(&self, entry: &UsageEntry) -> bool {
+        (
+            self.long_context,
+            self.cost_usd,
+            self.quota_usd,
+            self.priced,
+        ) == (
+            entry.long_context,
+            entry.cost_usd,
+            entry.quota_usd,
+            entry.priced,
+        )
+    }
+
+    fn apply(self, entry: UsageEntry) -> UsageEntry {
+        UsageEntry {
+            long_context: self.long_context,
+            cost_usd: self.cost_usd,
+            quota_usd: self.quota_usd,
+            priced: self.priced,
+            ..entry
         }
+    }
+}
+
+/// What a response of `model` with these tokens costs at `pricing`: when
+/// first read and again whenever prices change.
+fn price_of(
+    pricing: &Pricing,
+    model: &str,
+    tokens: &TokenCounts,
+    cache_write_1h: u64,
+    fast: bool,
+) -> Price {
+    let long_context = pricing
+        .long_context_threshold(model)
+        .is_some_and(|threshold| tokens.prompt() > threshold);
+    let rates = pricing.rates_for(model);
+    let (cost_usd, quota_usd) = rates.map_or((0.0, 0.0), |rates| {
+        (
+            pricing::tier_cost_usd(&rates, tokens, cache_write_1h, fast, long_context),
+            quota::quota_weight(&rates, tokens, cache_write_1h, fast, long_context),
+        )
+    });
+    Price {
+        long_context,
+        cost_usd,
+        quota_usd,
+        priced: rates.is_some(),
     }
 }
 
@@ -699,6 +1141,8 @@ mod tests {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
 
+    use chrono::TimeDelta;
+
     use super::*;
 
     fn line(id: &str, ts: &str, cwd: &str, input: u64) -> String {
@@ -721,7 +1165,7 @@ mod tests {
     impl TempDir {
         fn new(name: &str) -> Self {
             let dir =
-                std::env::temp_dir().join(format!("claude-pulse-{name}-{}", std::process::id()));
+                std::env::temp_dir().join(format!("cc-deskmeter-{name}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             Self(dir)
@@ -750,7 +1194,7 @@ mod tests {
                 line("m1", "2026-10-17T10:00:01Z", cwd, 10)
             ),
         );
-        let mut store = UsageStore::new(Some(tmp.0.clone()));
+        let mut store = UsageStore::new(Roots::from(tmp.0.clone()));
         assert!(store.refresh());
         assert!(!store.refresh(), "nothing new to read");
 
@@ -813,7 +1257,7 @@ mod tests {
             )
         };
         fs::write(&file, record(10)).unwrap();
-        let mut store = UsageStore::new(Some(tmp.0.clone()));
+        let mut store = UsageStore::new(Roots::from(tmp.0.clone()));
         store.refresh();
         assert_eq!(store.snapshot(Utc::now()).total.input_tokens, 10);
         for (i, tokens) in [90, 900].into_iter().enumerate() {
@@ -868,7 +1312,7 @@ mod tests {
         };
         fs::write(&file, record(10)).unwrap();
         let modified = file.metadata().unwrap().modified().unwrap();
-        let mut store = UsageStore::new(Some(tmp.0.clone()));
+        let mut store = UsageStore::new(Roots::from(tmp.0.clone()));
         store.refresh();
         fs::write(&file, record(90)).unwrap();
         set_modified(&file, modified);
@@ -894,11 +1338,11 @@ mod tests {
             .replace("\"usage\":", "\"stop_reason\":\"end_turn\",\"usage\":");
         fs::write(&complete, format!("{final_record}\n")).unwrap();
         for _ in 0..32 {
-            let mut store = UsageStore::new(Some(tmp.0.clone()));
+            let mut store = UsageStore::new(Roots::from(tmp.0.clone()));
             store.refresh();
             assert_eq!(store.snapshot(Utc::now()).total.input_tokens, 100);
         }
-        let mut store = UsageStore::new(Some(tmp.0.clone()));
+        let mut store = UsageStore::new(Roots::from(tmp.0.clone()));
         store.refresh();
         fs::remove_file(&complete).unwrap();
         assert!(store.refresh());
@@ -935,7 +1379,7 @@ mod tests {
             line("m3", "2026-10-18T02:30:00Z", "/p", 4),
         ];
         fs::write(&file, lines.join("\n") + "\n").unwrap();
-        let mut store = UsageStore::new(Some(tmp.0.clone()));
+        let mut store = UsageStore::new(Roots::from(tmp.0.clone()));
         store.refresh();
         let requested = |id: &str| store.files[&file].entries[id].requested_at;
         assert_eq!(
@@ -958,8 +1402,8 @@ mod tests {
             )
             .active_block
             .expect("block still open");
-        assert_eq!(block.start_time.to_rfc3339(), "2026-10-18T01:51:00+00:00");
-        assert_eq!(block.end_time.to_rfc3339(), "2026-10-18T06:51:00+00:00");
+        assert_eq!(block.start_time.to_rfc3339(), "2026-10-18T01:50:00+00:00");
+        assert_eq!(block.end_time.to_rfc3339(), "2026-10-18T06:50:00+00:00");
     }
 
     #[test]
@@ -985,7 +1429,7 @@ mod tests {
             line("legacy", "2026-10-18T15:02:00Z", "/p", 1),
         ];
         fs::write(&file, lines.join("\n") + "\n").unwrap();
-        let mut store = UsageStore::new(Some(tmp.0.clone()));
+        let mut store = UsageStore::new(Roots::from(tmp.0.clone()));
         store.refresh();
         let expected = DateTime::parse_from_rfc3339("2026-10-18T14:59:00Z").unwrap();
         for id in ["linked", "legacy"] {
@@ -1019,13 +1463,16 @@ mod tests {
                 parser::parse_line(&line("m", "2026-10-18T11:00:00Z", "/p", 1)).unwrap();
             parsed.parent_uuid = Some(parent.into());
             let timestamp = parsed.timestamp;
-            assert_eq!(state.to_entry(parsed).requested_at, timestamp);
+            assert_eq!(
+                state.to_entry(parsed, &Pricing::default()).requested_at,
+                timestamp
+            );
         }
     }
 
     #[test]
     fn snapshot_order_does_not_depend_on_clock_or_usage_changes() {
-        let mut store = UsageStore::new(None);
+        let mut store = UsageStore::new(Roots::default());
         let now = Utc::now();
         let first = store.snapshot(now);
         let second = store.snapshot(now);
@@ -1056,7 +1503,7 @@ mod tests {
             )
             .unwrap();
         }
-        let mut store = UsageStore::new(Some(tmp.0.clone()));
+        let mut store = UsageStore::new(Roots::from(tmp.0.clone()));
         store.refresh();
         append(
             &a,
@@ -1077,13 +1524,633 @@ mod tests {
     }
 
     #[test]
+    fn reads_every_root_once_and_picks_up_roots_created_later() {
+        let tmp = TempDir::new("multi-root");
+        let (legacy, xdg) = (tmp.0.join("legacy"), tmp.0.join("xdg"));
+        let a = legacy.join("-work-a").join("s.jsonl");
+        fs::create_dir_all(a.parent().unwrap()).unwrap();
+        fs::write(
+            &a,
+            format!(
+                "{}\n{}\n",
+                line("shared", "2026-10-18T10:00:00Z", "/work/a", 10),
+                line("only-a", "2026-10-18T10:00:30Z", "/work/a", 1)
+            ),
+        )
+        .unwrap();
+        let mut roots = Roots::from(xdg.clone());
+        roots.dirs.push(legacy.clone());
+        let mut store = UsageStore::new(roots);
+        assert!(store.refresh(), "a missing root does not hide the other");
+        assert_eq!(store.snapshot(Utc::now()).total.input_tokens, 11);
+
+        // The second root appears later, with a copy of the same response.
+        let b = xdg.join("-work-b").join("s.jsonl");
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+        fs::write(
+            &b,
+            format!(
+                "{}\n{}\n",
+                line("shared", "2026-10-18T10:00:00Z", "/work/a", 10),
+                line("only-b", "2026-10-18T10:01:00Z", "/work/b", 5)
+            ),
+        )
+        .unwrap();
+        assert!(store.refresh_paths(&HashSet::from([b.clone()])));
+        let data = store.snapshot(Utc::now());
+        assert_eq!(data.file_count, 2);
+        assert_eq!(data.total.input_tokens, 16, "deduplicated across roots");
+        let mut projects: Vec<_> = data.projects.iter().map(|p| p.id.as_str()).collect();
+        projects.sort();
+        assert_eq!(
+            projects,
+            ["-work-a", "-work-b"],
+            "project folders are per root"
+        );
+        assert!(
+            data.data_dirs
+                .iter()
+                .all(|dir| dir.ends_with("xdg") || dir.ends_with("legacy"))
+        );
+
+        // Paths outside every root are ignored.
+        assert!(!store.refresh_paths(&HashSet::from([tmp.0.join("elsewhere.jsonl")])));
+        fs::remove_dir_all(&xdg).unwrap();
+        assert!(store.refresh());
+        assert_eq!(store.snapshot(Utc::now()).total.input_tokens, 11);
+    }
+
+    #[test]
+    fn local_prices_apply_on_refresh_and_bad_files_keep_the_last_valid_ones() {
+        let tmp = TempDir::new("pricing-file");
+        let logs = tmp.0.join("projects");
+        fs::create_dir_all(&logs).unwrap();
+        fs::write(
+            logs.join("s.jsonl"),
+            format!("{}\n", line("m", "2026-10-18T10:00:00Z", "/p", 1_000_000)),
+        )
+        .unwrap();
+        let prices = tmp.0.join("pricing.json");
+        let mut store = UsageStore::new(Roots::from(logs)).with_pricing_file(Some(prices.clone()));
+        let cost = |store: &mut UsageStore| store.snapshot(Utc::now()).total.cost_usd;
+
+        store.refresh();
+        assert!(
+            (cost(&mut store) - 4.0).abs() < 1e-9,
+            "no file: built-in price"
+        );
+        assert_eq!(store.snapshot(Utc::now()).custom_prices, 0);
+
+        fs::write(
+            &prices,
+            r#"{ "claude-opus-5-5": { "input": 9, "output": 45 } }"#,
+        )
+        .unwrap();
+        assert!(
+            store.refresh(),
+            "an edited price file reprices without new usage"
+        );
+        let data = store.snapshot(Utc::now());
+        assert!((data.total.cost_usd - 9.0).abs() < 1e-9);
+        assert_eq!((data.custom_prices, data.pricing_error), (1, None));
+        assert!(!store.refresh(), "unchanged file is not reparsed");
+
+        fs::write(&prices, r#"{ "claude-opus-5-5": { "input": 9 "#).unwrap();
+        let generation = store.generation();
+        assert!(!store.refresh(), "prices are unchanged");
+        assert!(
+            store.generation() > generation,
+            "the error is still published"
+        );
+        let data = store.snapshot(Utc::now());
+        assert!(
+            (data.total.cost_usd - 9.0).abs() < 1e-9,
+            "last valid prices stay"
+        );
+        assert!(data.pricing_error.is_some());
+
+        fs::remove_file(&prices).unwrap();
+        assert!(store.refresh());
+        let data = store.snapshot(Utc::now());
+        assert!((data.total.cost_usd - 4.0).abs() < 1e-9);
+        assert_eq!((data.custom_prices, data.pricing_error), (0, None));
+    }
+
+    #[test]
+    fn weekly_use_is_attributed_to_projects_and_models() {
+        let tmp = TempDir::new("weekly-attribution");
+        let logs = tmp.0.join("projects");
+        // $4 per million input tokens (Opus 5.5).
+        for (folder, cwd, records) in [
+            (
+                "-work-alpha",
+                "/work/alpha",
+                vec![
+                    ("a1", "10:20", 1_000_000),
+                    ("a2", "10:50", 1_000_000),
+                    ("a3", "11:30", 500_000),
+                ],
+            ),
+            ("-work-beta", "/work/beta", vec![("b1", "10:35", 1_000_000)]),
+        ] {
+            let dir = logs.join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            let lines: Vec<String> = records
+                .iter()
+                .map(|(id, time, input)| line(id, &format!("2026-10-18T{time}:00Z"), cwd, *input))
+                .collect();
+            fs::write(dir.join("s.jsonl"), lines.join("\n") + "\n").unwrap();
+        }
+        // Desktop's readings: a reset at 10:15, then 2 points per $4 response.
+        let at = |time: &str| {
+            DateTime::parse_from_rfc3339(&format!("2026-10-18T{time}:00Z"))
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let samples: Vec<String> = [
+            ("10:00", 10),
+            ("10:15", 1),
+            ("10:30", 3),
+            ("10:45", 5),
+            ("11:00", 7),
+        ]
+        .iter()
+        .map(|(time, pct)| {
+            let t = at(time).timestamp_millis();
+            format!(r#"{{"t":{t},"org":"a","u":{{"fh":{pct},"sd":{pct}}}}}"#)
+        })
+        .collect();
+        let history = tmp.0.join("plan-usage-history.json");
+        fs::write(
+            &history,
+            format!(r#"{{"version":2,"samples":[{}]}}"#, samples.join(",")),
+        )
+        .unwrap();
+
+        let mut store = UsageStore::new(Roots::from(logs)).with_quota_files(vec![history]);
+        store.refresh();
+        let week = store.snapshot(at("12:00")).quota.unwrap().week.unwrap();
+        assert_eq!(week.period_start, at("10:00"));
+        let rows = |shares: &[quota::WeekShare]| -> Vec<(String, f64)> {
+            shares
+                .iter()
+                .map(|s| (s.name.clone(), (s.percent * 1e6).round() / 1e6))
+                .collect()
+        };
+        assert_eq!(
+            rows(&week.projects),
+            [("alpha".to_owned(), 5.0), ("beta".to_owned(), 2.0)]
+        );
+        assert_eq!(rows(&week.models), [("claude-opus-5-5".to_owned(), 7.0)]);
+        // 7 % at 11:00 plus the $2 since, from ~0 % at 10:00.
+        assert!((week.pace_per_hour.unwrap() - 4.0).abs() < 1e-9);
+    }
+
+    fn at_utc(ts: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn the_archive_keeps_usage_after_its_transcripts_are_deleted() {
+        let tmp = TempDir::new("archive-store");
+        let logs = tmp.0.join("projects");
+        let config = tmp.0.join("config");
+        let (alpha, beta) = (logs.join("-work-alpha"), logs.join("-work-beta"));
+        for dir in [&alpha, &beta] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        // Days that have finished in any zone at `now`.
+        fs::write(
+            alpha.join("s1.jsonl"),
+            format!(
+                "{}\n{}\n",
+                line("m1", "2026-10-17T10:00:00Z", "/work/alpha", 3_000_000),
+                line("m2", "2026-10-17T10:30:00Z", "/work/alpha", 1_000_000)
+            ),
+        )
+        .unwrap();
+        fs::write(
+            beta.join("s2.jsonl"),
+            format!(
+                "{}\n",
+                line("m3", "2026-10-18T09:00:00Z", "/work/beta", 2_000_000)
+            ),
+        )
+        .unwrap();
+        let now = at_utc("2026-10-19T12:00:00Z");
+        let mut store = UsageStore::new(Roots::from(logs.clone()));
+        store.open_archive(config.clone());
+        store.refresh();
+        let before = store.snapshot(now);
+        assert_eq!(before.total.input_tokens, 6_000_000);
+        let status = before.archive.as_ref().unwrap();
+        assert_eq!((status.blocks, status.restored_responses), (2, 0));
+        let read = |name| fs::read_to_string(config.join(name)).unwrap();
+        let (daily, blocks) = (read(archive::DAILY_FILE), read(archive::BLOCKS_FILE));
+        for text in [&daily, &blocks] {
+            for private in ["\"s1\"", "\"m1\"", "req_m1", "s1.jsonl"] {
+                assert!(!text.contains(private), "{private} in {text}");
+            }
+        }
+        assert!(
+            daily.contains("/work/alpha"),
+            "names outlive the transcripts"
+        );
+
+        // Claude Code cleans up alpha's transcript.
+        fs::remove_file(alpha.join("s1.jsonl")).unwrap();
+        assert!(store.refresh());
+        let after = store.snapshot(now);
+        assert_eq!(
+            (after.total.input_tokens, after.total.message_count),
+            (6_000_000, 3)
+        );
+        assert!((after.total.cost_usd - before.total.cost_usd).abs() < 1e-9);
+        let row = after
+            .projects
+            .iter()
+            .find(|p| p.id == "-work-alpha")
+            .unwrap();
+        assert_eq!(
+            (row.name.as_str(), row.path.as_deref(), row.session_count),
+            ("alpha", Some("/work/alpha"), 1)
+        );
+        assert_eq!(row.last_activity, at_utc("2026-10-17T10:30:00Z"));
+        assert_eq!(after.peak_block.unwrap().usage.input_tokens, 4_000_000);
+        assert_eq!(after.archive.unwrap().restored_responses, 2);
+        let summary = store.archive_summary(now);
+        assert_eq!(
+            (
+                summary.restored.input_tokens,
+                summary.restored.message_count
+            ),
+            (4_000_000, 2)
+        );
+        let blocks: Vec<_> = summary
+            .blocks
+            .iter()
+            .map(|b| (b.total_tokens, b.message_count))
+            .collect();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            blocks[0].1, 2,
+            "the archived block stands in for its responses"
+        );
+        assert_eq!(summary.blocks[0].opened_at, at_utc("2026-10-17T10:00:00Z"));
+        let files: Vec<_> = summary.files.iter().map(|f| f.name.as_str()).collect();
+        assert!(files.contains(&archive::DAILY_FILE) && files.contains(&archive::BLOCKS_FILE));
+        assert!(summary.reveal_path.unwrap().ends_with(archive::DAILY_FILE));
+
+        // The next launch, with no transcripts left at all.
+        fs::remove_file(beta.join("s2.jsonl")).unwrap();
+        let mut fresh = UsageStore::new(Roots::from(logs));
+        fresh.open_archive(config);
+        fresh.refresh();
+        let restored = fresh.snapshot(now);
+        assert_eq!(
+            (restored.total.input_tokens, restored.total.message_count),
+            (6_000_000, 3)
+        );
+        let daily_tokens: u64 = restored.daily.iter().map(|d| d.usage.input_tokens).sum();
+        assert_eq!(daily_tokens, 6_000_000);
+        assert_eq!(restored.models[0].model, "claude-opus-5-5");
+        assert_eq!(restored.peak_block.unwrap().usage.input_tokens, 4_000_000);
+    }
+
+    #[test]
+    fn partial_cross_day_sessions_stay_unique_after_rewrites_and_restarts() {
+        let tmp = TempDir::new("archive-partial-sessions");
+        let logs = tmp.0.join("projects");
+        let project = logs.join("-work-alpha");
+        fs::create_dir_all(&project).unwrap();
+        let config = tmp.0.join("config");
+        let path = project.join("s1.jsonl");
+        let early = line("m1", "2026-10-14T10:00:00Z", "/work/alpha", 100);
+        let later = line("m2", "2026-10-16T10:00:00Z", "/work/alpha", 200);
+        fs::write(&path, format!("{early}\n{later}\n")).unwrap();
+        let now = at_utc("2026-10-20T12:00:00Z");
+        let mut store = UsageStore::new(Roots::from(logs.clone()));
+        store.open_archive(config.clone());
+        store.refresh();
+        let before = store.snapshot(now);
+        assert_eq!(before.projects[0].session_count, 1);
+        assert_eq!(before.total.input_tokens, 300);
+
+        fs::write(&path, format!("{later}\n")).unwrap();
+        assert!(store.refresh());
+        let partial = store.snapshot(now);
+        assert_eq!(partial.projects[0].session_count, 1);
+        assert_eq!(partial.total.input_tokens, 300);
+        let mut restarted = UsageStore::new(Roots::from(logs.clone()));
+        restarted.open_archive(config.clone());
+        restarted.refresh();
+        assert_eq!(restarted.snapshot(now).projects[0].session_count, 1);
+
+        // A continuation remains the same session; a different id adds one.
+        let continued = line("m3", "2026-10-18T10:00:00Z", "/work/alpha", 300);
+        let other = line("m4", "2026-10-18T11:00:00Z", "/work/alpha", 400)
+            .replace("\"sessionId\":\"s1\"", "\"sessionId\":\"s2\"");
+        append(&path, &format!("{continued}\n{other}\n"));
+        assert!(restarted.refresh());
+        let added = restarted.snapshot(now);
+        assert_eq!(added.projects[0].session_count, 2);
+        assert_eq!(added.total.input_tokens, 1000);
+
+        fs::remove_file(&path).unwrap();
+        let mut gone = UsageStore::new(Roots::from(logs));
+        gone.open_archive(config);
+        gone.refresh();
+        let restored = gone.snapshot(now);
+        assert_eq!(restored.projects[0].session_count, 2);
+        assert_eq!(restored.total.input_tokens, 1000);
+    }
+
+    #[test]
+    fn weekly_readings_outlive_desktops_own_log() {
+        let tmp = TempDir::new("archive-weekly");
+        let logs = tmp.0.join("projects").join("-work-alpha");
+        fs::create_dir_all(&logs).unwrap();
+        let at = |time: &str| at_utc(&format!("2026-10-18T{time}:00Z"));
+        // $4 a response, 2 points each, after a reset at 10:15.
+        let lines: Vec<String> = ["10:20", "10:35", "10:50"]
+            .iter()
+            .enumerate()
+            .map(|(i, time)| {
+                line(
+                    &format!("m{i}"),
+                    &format!("2026-10-18T{time}:00Z"),
+                    "/work/alpha",
+                    1_000_000,
+                )
+            })
+            .collect();
+        fs::write(logs.join("s.jsonl"), lines.join("\n") + "\n").unwrap();
+        let samples: Vec<String> = [
+            ("10:00", 10),
+            ("10:15", 1),
+            ("10:30", 3),
+            ("10:45", 5),
+            ("11:00", 7),
+        ]
+        .iter()
+        .map(|(time, pct)| {
+            let t = at(time).timestamp_millis();
+            format!(r#"{{"t":{t},"org":"org-secret","u":{{"fh":{pct},"sd":{pct}}}}}"#)
+        })
+        .collect();
+        let history = tmp.0.join("plan-usage-history.json");
+        let write = |samples: &[String]| {
+            fs::write(
+                &history,
+                format!(r#"{{"version":2,"samples":[{}]}}"#, samples.join(",")),
+            )
+            .unwrap();
+        };
+        write(&samples);
+        let config = tmp.0.join("config");
+        let mut store = UsageStore::new(Roots::from(tmp.0.join("projects")))
+            .with_quota_files(vec![history.clone()]);
+        store.open_archive(config.clone());
+        store.refresh();
+        let week = store.snapshot(at("12:00")).quota.unwrap().week.unwrap();
+        assert_eq!(
+            (week.period_start, week.reset_observed),
+            (at("10:00"), true)
+        );
+
+        // Desktop keeps only its newest sample: the archive still has the reset.
+        write(&samples[4..]);
+        let week = store.snapshot(at("12:00")).quota.unwrap().week.unwrap();
+        assert_eq!(
+            (week.period_start, week.reset_observed),
+            (at("10:00"), true)
+        );
+        assert_eq!(week.projects.len(), 1);
+        assert!((week.projects[0].percent - 6.0).abs() < 1e-9);
+
+        let text = fs::read_to_string(config.join(archive::WEEKLY_FILE)).unwrap();
+        assert!(!text.contains("org-secret"), "only a hash of the account");
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let account = &json["accounts"][0];
+        let readings = account["readings"].as_array().unwrap();
+        assert_eq!(readings.len(), 5);
+        assert!(readings.iter().all(|r| r["source"] == "official"));
+        assert_eq!(account["resets"][0]["source"], "official");
+        assert_eq!(account["resets"][0]["toPercent"], 1.0);
+        let fits = account["calibration"].as_array().unwrap();
+        assert!(!fits.is_empty() && fits.iter().all(|c| c["source"] == "estimate"));
+    }
+
+    #[test]
+    fn the_quota_fit_is_kept_and_the_archive_left_alone_while_only_the_clock_moves() {
+        let tmp = TempDir::new("archive-quiet-ticks");
+        let logs = tmp.0.join("projects").join("-work-alpha");
+        fs::create_dir_all(&logs).unwrap();
+        let transcript = logs.join("s.jsonl");
+        let base = at_utc("2026-10-18T10:00:00Z");
+        let minutes = |m: i64| base + TimeDelta::minutes(m);
+        // $4 a response between Desktop's readings, which are stamped to the
+        // millisecond and rise unevenly, so the recency weights shape the fit.
+        let lines: Vec<String> = (0..4)
+            .map(|i| {
+                let ts = minutes(15 * i + 5).to_rfc3339();
+                line(&format!("m{i}"), &ts, "/work/alpha", 1_000_000)
+            })
+            .collect();
+        fs::write(&transcript, lines.join("\n") + "\n").unwrap();
+        let mut samples: Vec<String> = [(123, 1), (457, 3), (789, 9), (12, 11), (345, 17)]
+            .iter()
+            .zip(0..)
+            .map(|((ms, pct), i)| {
+                let t = (minutes(15 * i) + TimeDelta::milliseconds(*ms)).timestamp_millis();
+                format!(r#"{{"t":{t},"org":"a","u":{{"fh":{pct},"sd":{pct}}}}}"#)
+            })
+            .collect();
+        let history = tmp.0.join("plan-usage-history.json");
+        let write = |samples: &[String]| {
+            fs::write(
+                &history,
+                format!(r#"{{"version":2,"samples":[{}]}}"#, samples.join(",")),
+            )
+            .unwrap();
+        };
+        write(&samples);
+        let config = tmp.0.join("config");
+        let mut store = UsageStore::new(Roots::from(tmp.0.join("projects")))
+            .with_quota_files(vec![history.clone()]);
+        store.open_archive(config.clone());
+        store.refresh();
+        let now = minutes(70);
+        assert!(store.snapshot(now).quota.is_some());
+        let weekly = config.join(archive::WEEKLY_FILE);
+        assert!(weekly.exists());
+        let fit = store.quota_fit.as_ref().unwrap();
+        let (spend, fitted) = (Arc::clone(&fit.spend), fit.fitted);
+        assert!(fitted.five_hour.is_some() && fitted.seven_day.is_some());
+
+        // Snapshots a fraction of a second or more apart reuse the spend and
+        // the fit, and the archive is not written again.
+        fs::remove_file(&weekly).unwrap();
+        for later in [1, 250, 999, 1_500, 17_321] {
+            store.snapshot(now + TimeDelta::milliseconds(later));
+            let fit = store.quota_fit.as_ref().unwrap();
+            assert!(Arc::ptr_eq(&fit.spend, &spend), "{later} ms later");
+            assert_eq!(fit.fitted, fitted, "{later} ms later");
+            assert!(!weekly.exists(), "rewritten {later} ms later");
+        }
+
+        // A new reading is fitted on the same spend.
+        let t = (minutes(75) + TimeDelta::milliseconds(678)).timestamp_millis();
+        samples.push(format!(r#"{{"t":{t},"org":"a","u":{{"fh":19,"sd":19}}}}"#));
+        write(&samples);
+        store.snapshot(minutes(76));
+        let fit = store.quota_fit.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&fit.spend, &spend));
+        assert_eq!(fit.samples.len(), 6);
+        assert!(weekly.exists(), "the new reading is archived");
+
+        // New usage collects the spend again.
+        let ts = minutes(77).to_rfc3339();
+        append(
+            &transcript,
+            &format!("{}\n", line("m9", &ts, "/work/alpha", 1_000)),
+        );
+        assert!(store.refresh());
+        store.snapshot(minutes(78));
+        assert!(!Arc::ptr_eq(
+            &store.quota_fit.as_ref().unwrap().spend,
+            &spend
+        ));
+    }
+
+    #[test]
+    fn new_prices_reprice_what_was_read_without_reading_it_again() {
+        let tmp = TempDir::new("pricing-in-memory");
+        let logs = tmp.0.join("projects");
+        fs::create_dir_all(&logs).unwrap();
+        let file = logs.join("s.jsonl");
+        let record = |input| format!("{}\n", line("m", "2026-10-18T10:00:00Z", "/p", input));
+        fs::write(&file, record(1_000_000)).unwrap();
+        let modified = file.metadata().unwrap().modified().unwrap();
+        let prices = tmp.0.join("pricing.json");
+        let mut store = UsageStore::new(Roots::from(logs)).with_pricing_file(Some(prices.clone()));
+        store.refresh();
+        assert!((store.snapshot(Utc::now()).total.cost_usd - 4.0).abs() < 1e-9);
+
+        // A change no metadata shows: only reading the transcript would see it.
+        fs::write(&file, record(9_000_000)).unwrap();
+        set_modified(&file, modified);
+        fs::write(
+            &prices,
+            r#"{ "claude-opus-5-5": { "input": 9, "output": 45 } }"#,
+        )
+        .unwrap();
+        let generation = store.generation();
+        assert!(store.refresh());
+        assert!(store.generation() > generation);
+        let data = store.snapshot(Utc::now());
+        assert_eq!(data.total.input_tokens, 1_000_000, "not read again");
+        assert!((data.total.cost_usd - 9.0).abs() < 1e-9);
+        // A rescan reads it, at the new prices.
+        assert!(store.rescan());
+        assert!((store.snapshot(Utc::now()).total.cost_usd - 81.0).abs() < 1e-9);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn new_prices_reprice_a_transcript_that_cannot_be_read() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let tmp = TempDir::new("pricing-locked-transcript");
+        let logs = tmp.0.join("projects");
+        fs::create_dir_all(&logs).unwrap();
+        let file = logs.join("s.jsonl");
+        fs::write(
+            &file,
+            format!("{}\n", line("m", "2026-10-18T10:00:00Z", "/p", 1_000_000)),
+        )
+        .unwrap();
+        let prices = tmp.0.join("pricing.json");
+        let config = tmp.0.join("config");
+        let mut store = UsageStore::new(Roots::from(logs)).with_pricing_file(Some(prices.clone()));
+        store.open_archive(config.clone());
+        store.refresh();
+        // A day that has finished in any zone, so it is archived.
+        let now = at_utc("2026-10-20T12:00:00Z");
+        assert!((store.snapshot(now).total.cost_usd - 4.0).abs() < 1e-9);
+
+        let exclusive = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&file)
+            .unwrap();
+        fs::write(
+            &prices,
+            r#"{ "claude-opus-5-5": { "input": 9, "output": 45 } }"#,
+        )
+        .unwrap();
+        assert!(store.refresh());
+        let data = store.snapshot(now);
+        drop(exclusive);
+        assert!((data.total.cost_usd - 9.0).abs() < 1e-9);
+        assert!(data.read_errors.is_empty(), "{:?}", data.read_errors);
+        // The archive's costs match the prices it records.
+        let daily: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(config.join(archive::DAILY_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(daily["prices"]["claude-opus-5-5"]["input"], 9.0);
+        let cost = daily["days"][0]["usage"][0]["costUsd"].as_f64().unwrap();
+        assert!((cost - 9.0).abs() < 1e-9, "{cost}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_price_file_that_could_not_be_read_is_retried() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let tmp = TempDir::new("pricing-locked");
+        let logs = tmp.0.join("projects");
+        fs::create_dir_all(&logs).unwrap();
+        fs::write(
+            logs.join("s.jsonl"),
+            format!("{}\n", line("m", "2026-10-18T10:00:00Z", "/p", 1_000_000)),
+        )
+        .unwrap();
+        let prices = tmp.0.join("pricing.json");
+        fs::write(
+            &prices,
+            r#"{ "claude-opus-5-5": { "input": 9, "output": 45 } }"#,
+        )
+        .unwrap();
+        let mut store = UsageStore::new(Roots::from(logs)).with_pricing_file(Some(prices.clone()));
+        let exclusive = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&prices)
+            .unwrap();
+        store.refresh();
+        let locked = store.snapshot(Utc::now());
+        assert!(locked.pricing_error.is_some());
+        assert!(
+            (locked.total.cost_usd - 4.0).abs() < 1e-9,
+            "built-in price meanwhile"
+        );
+        drop(exclusive);
+        // The metadata is unchanged, so only a retry picks the prices up.
+        assert!(store.refresh());
+        let data = store.snapshot(Utc::now());
+        assert_eq!((data.custom_prices, data.pricing_error), (1, None));
+        assert!((data.total.cost_usd - 9.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn validation_catches_silent_rewrites_and_rejects_obsolete_results() {
         let tmp = TempDir::new("validation-incarnation");
         let file = tmp.0.join("s.jsonl");
         let record = |tokens| format!("{}\n", line("same", "2026-10-18T10:00:00Z", "/p", tokens));
         fs::write(&file, record(10)).unwrap();
         let modified = file.metadata().unwrap().modified().unwrap();
-        let mut store = UsageStore::new(Some(tmp.0.clone()));
+        let mut store = UsageStore::new(Roots::from(tmp.0.clone()));
         store.refresh();
         let job = store.validation_jobs(true).pop().unwrap();
         // Appending after capturing a job must not starve validation.
@@ -1112,11 +2179,18 @@ mod tests {
         let tmp = TempDir::new("validation-scope");
         let (grown, idle) = (tmp.0.join("grown.jsonl"), tmp.0.join("idle.jsonl"));
         for (path, id) in [(&grown, "g"), (&idle, "i")] {
-            fs::write(path, format!("{}\n", line(id, "2026-10-18T10:00:00Z", "/p", 1))).unwrap();
+            fs::write(
+                path,
+                format!("{}\n", line(id, "2026-10-18T10:00:00Z", "/p", 1)),
+            )
+            .unwrap();
         }
-        let mut store = UsageStore::new(Some(tmp.0.clone()));
+        let mut store = UsageStore::new(Roots::from(tmp.0.clone()));
         store.refresh();
-        assert!(store.validation_jobs(false).is_empty(), "both were just read in full");
+        assert!(
+            store.validation_jobs(false).is_empty(),
+            "both were just read in full"
+        );
         assert_eq!(store.validation_jobs(true).len(), 2);
         append(
             &grown,
@@ -1129,7 +2203,10 @@ mod tests {
         for job in jobs {
             assert!(!store.apply_validation(job.check()));
         }
-        assert!(store.validation_jobs(false).is_empty(), "the audited prefix is remembered");
+        assert!(
+            store.validation_jobs(false).is_empty(),
+            "the audited prefix is remembered"
+        );
     }
 
     #[test]
@@ -1142,7 +2219,7 @@ mod tests {
         fs::write(&quiet, record("q", 10)).unwrap();
         fs::write(&busy, record("b", 20)).unwrap();
         let modified = quiet.metadata().unwrap().modified().unwrap();
-        let mut store = UsageStore::new(Some(tmp.0.clone()));
+        let mut store = UsageStore::new(Roots::from(tmp.0.clone()));
         store.refresh();
         // Same length and timestamp: only a full read could tell.
         fs::write(&quiet, record("q", 90)).unwrap();
@@ -1182,14 +2259,20 @@ mod tests {
         // A parent that fell out of the window: the response's own time.
         lines.push(response("orphan", "2026-10-18T11:00:09Z", "u0"));
         fs::write(&file, lines.join("\n") + "\n").unwrap();
-        let mut store = UsageStore::new(Some(tmp.0.clone()));
+        let mut store = UsageStore::new(Roots::from(tmp.0.clone()));
         store.refresh();
         let state = &store.files[&file];
         assert_eq!(state.records.len(), MAX_RECORD_LINKS);
         assert_eq!(state.record_order.len(), MAX_RECORD_LINKS);
         let at = |ts| DateTime::parse_from_rfc3339(ts).unwrap();
-        assert_eq!(state.entries["answer"].requested_at, at("2026-10-18T11:00:00Z"));
-        assert_eq!(state.entries["orphan"].requested_at, at("2026-10-18T11:00:09Z"));
+        assert_eq!(
+            state.entries["answer"].requested_at,
+            at("2026-10-18T11:00:00Z")
+        );
+        assert_eq!(
+            state.entries["orphan"].requested_at,
+            at("2026-10-18T11:00:09Z")
+        );
     }
 
     #[cfg(windows)]
@@ -1203,7 +2286,7 @@ mod tests {
             format!("{}\n", line("m", "2026-10-18T10:00:00Z", "/p", 10)),
         )
         .unwrap();
-        let mut store = UsageStore::new(Some(tmp.0.clone()));
+        let mut store = UsageStore::new(Roots::from(tmp.0.clone()));
         let exclusive = OpenOptions::new()
             .read(true)
             .share_mode(0)
@@ -1242,7 +2325,9 @@ mod tests {
 
     #[test]
     fn missing_root_yields_empty_data() {
-        let mut store = UsageStore::new(Some(PathBuf::from("/definitely/not/here/claude-pulse")));
+        let mut store = UsageStore::new(Roots::from(PathBuf::from(
+            "/definitely/not/here/cc-deskmeter",
+        )));
         assert!(!store.refresh());
         let data = store.snapshot(Utc::now());
         assert_eq!(data.total.total_tokens, 0);
@@ -1260,19 +2345,34 @@ mod tests {
     }
 
     /// `cargo test -- --ignored --nocapture scan_real_logs`
-    /// (set `CLAUDE_PULSE_ROOT` to scan a copy instead of `~/.claude/projects`).
+    /// (set `CC_DESKMETER_ROOT` to scan a copy instead of the discovered roots).
     #[test]
-    #[ignore = "reads the real ~/.claude/projects"]
+    #[ignore = "reads the real Claude Code transcripts"]
     fn scan_real_logs() {
-        let root = std::env::var_os("CLAUDE_PULSE_ROOT")
-            .map(PathBuf::from)
-            .or_else(UsageStore::default_root);
-        let mut store = UsageStore::new(root);
+        let roots = std::env::var_os("CC_DESKMETER_ROOT")
+            .map_or_else(Roots::discover, |root| Roots::from(PathBuf::from(root)));
+        let mut store = UsageStore::new(roots).with_quota_files(quota::default_paths());
+        // A throwaway archive, to time building it from every transcript.
+        let archive = TempDir::new("real-archive");
+        store.open_archive(archive.0.clone());
         let started = std::time::Instant::now();
         store.refresh();
         let scan = started.elapsed();
+        let started = std::time::Instant::now();
         let data = store.snapshot(Utc::now());
+        let first = started.elapsed();
+        let started = std::time::Instant::now();
+        store.snapshot(Utc::now());
+        let tick = started.elapsed();
         println!("{}", serde_json::to_string_pretty(&data).unwrap());
-        println!("initial scan: {scan:?}");
+        println!("initial scan: {scan:?}; first snapshot (archives): {first:?}; next: {tick:?}");
+        for name in [
+            archive::DAILY_FILE,
+            archive::BLOCKS_FILE,
+            archive::WEEKLY_FILE,
+        ] {
+            let size = fs::metadata(archive.0.join(name)).map_or(0, |meta| meta.len());
+            println!("{name}: {size} bytes");
+        }
     }
 }

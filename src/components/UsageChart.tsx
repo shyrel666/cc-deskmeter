@@ -1,5 +1,5 @@
 import { CalendarDays, CalendarRange, ChartArea, ChartColumnStacked, EyeOff, Layers, Table2 } from "lucide-react";
-import { memo, useMemo, useState, type ReactNode } from "react";
+import { memo, useMemo, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -24,6 +24,7 @@ import { SERIES_KEYS, seriesSwatch, type ChartTheme, type SeriesKey, type ThemeD
 import type { UsageData } from "../types";
 import { ChartTooltip } from "./ChartTooltip";
 import { Card, CardTitle, SeriesKeyMark } from "./ui/Card";
+import { IconToggle } from "./ui/IconToggle";
 import { Segmented, type SegmentOption } from "./ui/Segmented";
 import { Switch } from "./ui/Switch";
 
@@ -51,8 +52,8 @@ export const UsageChart = memo(function UsageChart({ data, todayKey }: { data: U
   const points = useMemo<ChartPoint[]>(() => {
     if (view === "block") return block ? blockPoints(block, strip) : [];
     if (view === "daily") return dailyPoints(data.daily, todayKey, strip, lang);
-    return monthlyPoints(data.daily, todayKey, strip, lang);
-  }, [view, block, data.daily, todayKey, strip, lang]);
+    return monthlyPoints(data.monthly, todayKey, strip, lang);
+  }, [view, block, data.daily, data.monthly, todayKey, strip, lang]);
   const totals = useMemo(() => sumPoints(points), [points]);
 
   const views = useMemo<SegmentOption<View>[]>(
@@ -164,32 +165,6 @@ function StripToggle({
       </label>
       <Switch id="strip-cache-read" checked={checked} onChange={onChange} label={t.chart.stripLabel} />
     </div>
-  );
-}
-
-function IconToggle({ active, onClick, label, children }: { active: boolean; onClick: () => void; label: string; children: ReactNode }) {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      aria-label={label}
-      title={label}
-      onClick={onClick}
-      className={cn(
-        "grid size-8 place-items-center transition-colors",
-        active ? "text-ink" : "text-ink-3 hover:text-ink-2",
-        "warm:rounded-full warm:border warm:border-line",
-        active ? "warm:bg-raised" : "warm:bg-[#1a1a18]",
-        "swiss:rounded-md",
-        active
-          ? "swiss:key-pressed swiss:text-accent"
-          : "swiss:key-cap swiss:text-ink-2 swiss:hover:bg-white swiss:active:key-pressed",
-        "glass:rounded-full glass:border glass:border-white/[0.08]",
-        active ? "glass:bg-white/[0.13]" : "glass:bg-white/[0.05]",
-      )}
-    >
-      {children}
-    </button>
   );
 }
 

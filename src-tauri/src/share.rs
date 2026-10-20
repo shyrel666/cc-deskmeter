@@ -1,5 +1,7 @@
-//! Saves an exported share card. This is the only file Claude Pulse writes,
-//! and only when the user clicks "Save PNG".
+//! Saves an exported share card, when the user clicks "Save PNG": the only
+//! file CC-Deskmeter writes outside its config folder, which holds its own
+//! `tray.json` and history archive (`archive-*.json`, plus any unreadable
+//! one set aside as `*.corrupt.json`).
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -15,16 +17,26 @@ const MAX_BYTES: usize = 32 * 1024 * 1024;
 /// then home) under a timestamped name. Never overwrites an existing file.
 pub fn save_png(bytes: &[u8]) -> io::Result<PathBuf> {
     if !bytes.starts_with(PNG_SIGNATURE) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a PNG image"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a PNG image",
+        ));
     }
     if bytes.len() > MAX_BYTES {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "image is too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "image is too large",
+        ));
     }
     let dir = dirs::download_dir()
         .or_else(dirs::picture_dir)
         .or_else(dirs::home_dir)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no Downloads folder"))?;
-    write_new(&dir, &format!("claude-pulse-{}", Local::now().format("%Y%m%d-%H%M%S")), bytes)
+    write_new(
+        &dir,
+        &format!("cc-deskmeter-{}", Local::now().format("%Y%m%d-%H%M%S")),
+        bytes,
+    )
 }
 
 fn write_new(dir: &Path, stem: &str, bytes: &[u8]) -> io::Result<PathBuf> {
@@ -42,7 +54,10 @@ fn write_new(dir: &Path, stem: &str, bytes: &[u8]) -> io::Result<PathBuf> {
             Err(err) => return Err(err),
         }
     }
-    Err(io::Error::new(io::ErrorKind::AlreadyExists, "too many cards saved this second"))
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "too many cards saved this second",
+    ))
 }
 
 #[cfg(test)]
@@ -63,7 +78,7 @@ mod tests {
 
     #[test]
     fn never_overwrites() {
-        let dir = std::env::temp_dir().join(format!("claude-pulse-share-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cc-deskmeter-share-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let first = write_new(&dir, "card", &png()).unwrap();
         let second = write_new(&dir, "card", &png()).unwrap();

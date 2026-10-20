@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
   <!--
-    Claude Pulse app icon. Full-bleed variant for icon.ico, so the
+    CC-Deskmeter app icon. Full-bleed variant for icon.ico, so the
     16-32 px taskbar and title-bar sizes are not shrunk by the macOS margin.
     Claude Code's prompt chevron followed by a heartbeat: the live pulse of
     your sessions.

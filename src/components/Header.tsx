@@ -1,4 +1,4 @@
-import { Clock, Flame, Info, Languages, PictureInPicture2, RotateCw, Share2 } from "lucide-react";
+import { Archive, Clock, Flame, Gauge, Info, Languages, PictureInPicture2, Share2 } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 
 import { useNow } from "../hooks/useNow";
@@ -7,7 +7,7 @@ import { useI18n } from "../i18n/I18nProvider";
 import { APP_VERSION } from "../lib/app";
 import { cn } from "../lib/cn";
 import {
-  displayDataDir,
+  displayDataDirs,
   formatClock,
   formatInteger,
   formatPercent,
@@ -16,26 +16,27 @@ import {
   splitDuration,
 } from "../lib/format";
 import { useTheme } from "../theme/ThemeProvider";
-import type { ActiveBlock, PastBlock, UsageData } from "../types";
+import type { ActiveBlock, PastBlock, QuotaStatus, UsageData } from "../types";
 import { LogoMark } from "./LogoMark";
 import { ThemeSwitcher } from "./ThemeSwitcher";
+import { AnimatedNumber } from "./ui/AnimatedNumber";
 import { Meter } from "./ui/Meter";
 
 interface HeaderProps {
   data: UsageData | null;
   status: FeedStatus;
-  refreshing: boolean;
-  onRefresh: () => void;
   onShare: () => void;
   onMiniMode: () => void;
   onAbout: () => void;
+  onArchive: () => void;
   revision: number;
 }
 
-export function Header({ data, status, refreshing, onRefresh, onShare, onMiniMode, onAbout, revision }: HeaderProps) {
+export function Header({ data, status, onShare, onMiniMode, onAbout, onArchive, revision }: HeaderProps) {
   const { t, toggleLang } = useI18n();
   return (
-    <header className="sticky top-0 z-40 glass:px-4 sm:glass:px-6">
+    // First in the entrance cascade (slot 0).
+    <header className="intro-rise sticky top-0 z-40 glass:px-4 sm:glass:px-6">
       <div className="pulse-header glass:mx-auto glass:max-w-[1440px]">
         <div
           className={cn(
@@ -49,6 +50,7 @@ export function Header({ data, status, refreshing, onRefresh, onShare, onMiniMod
           <BlockCapsule
             block={data?.activeBlock ?? null}
             peak={data?.peakBlock ?? null}
+            quota={data?.quota ?? null}
             className="order-last col-span-2 xl:order-none xl:col-span-1"
           />
           <div className="flex items-center justify-self-end gap-2">
@@ -59,11 +61,17 @@ export function Header({ data, status, refreshing, onRefresh, onShare, onMiniMod
             <HeaderButton label={t.header.shareLabel} hint={t.header.shareHint} onClick={onShare} disabled={!data}>
               <Share2 className="size-4" strokeWidth={1.75} aria-hidden />
             </HeaderButton>
+            <HeaderButton
+              label={t.header.archiveLabel}
+              hint={t.header.archiveHint}
+              shortcut="A"
+              onClick={onArchive}
+              disabled={!data}
+            >
+              <Archive className="size-4" strokeWidth={1.75} aria-hidden />
+            </HeaderButton>
             <HeaderButton label={t.header.miniLabel} hint={t.header.miniHint} shortcut="M" onClick={onMiniMode}>
               <PictureInPicture2 className="size-4" strokeWidth={1.75} aria-hidden />
-            </HeaderButton>
-            <HeaderButton label={t.header.refreshLabel} hint={t.header.refreshHint} shortcut="R" onClick={onRefresh}>
-              <RotateCw className={cn("size-4", refreshing && "animate-spin")} strokeWidth={1.75} aria-hidden />
             </HeaderButton>
             <HeaderButton label={t.header.aboutLabel} hint={t.header.aboutHint} onClick={onAbout}>
               <Info className="size-4" strokeWidth={1.75} aria-hidden />
@@ -75,7 +83,7 @@ export function Header({ data, status, refreshing, onRefresh, onShare, onMiniMod
   );
 }
 
-const STATUS_COLOR: Record<FeedStatus, string> = {
+export const STATUS_COLOR: Record<FeedStatus, string> = {
   partial: "var(--pulse-warn)",
   live: "var(--pulse-good)",
   connecting: "var(--pulse-warn)",
@@ -93,14 +101,14 @@ interface BrandProps {
 function Brand({ data, status, revision, onAbout }: BrandProps) {
   const { t } = useI18n();
   // The watched folder and transcript count stay off screen; hover reveals them.
-  const detail = data ? t.header.transcripts(displayDataDir(data.dataDir), formatInteger(data.fileCount)) : undefined;
+  const detail = data ? t.header.transcripts(displayDataDirs(data.dataDirs), formatInteger(data.fileCount)) : undefined;
   return (
     <div className="flex min-w-0 items-center gap-3">
       <LogoMark />
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-2">
           <h1 className="pulse-wordmark truncate">
-            <span className="wm-claude">Claude</span> <span className="wm-pulse">Pulse</span>
+            <span className="wm-cc">cc</span> <span className="wm-meter">deskmeter</span>
           </h1>
           <button
             type="button"
@@ -166,16 +174,25 @@ function HeaderButton({ label, hint, shortcut, onClick, disabled, children }: He
 }
 
 const BLOCK_SECONDS = 5 * 3600;
-/** Hour marks on the Swiss Industrial dial scale. */
+/** Marks on the Swiss Industrial dial scale: hours of the block, or quota percent. */
 const BLOCK_MARKS = ["0", "1h", "2h", "3h", "4h", "5h"];
+const QUOTA_MARKS = ["0", "20", "40", "60", "80", "100%"];
+
+/** Fill colour by how close the 5-hour quota is to its limit. */
+export function quotaColor(percent: number): string | undefined {
+  if (percent >= 90) return "var(--pulse-danger)";
+  if (percent >= 75) return "var(--pulse-warn)";
+  return undefined;
+}
 
 interface BlockCapsuleProps {
   block: ActiveBlock | null;
   peak: PastBlock | null;
+  quota: QuotaStatus | null;
   className?: string;
 }
 
-function BlockCapsule({ block, peak, className }: BlockCapsuleProps) {
+function BlockCapsule({ block, peak, quota, className }: BlockCapsuleProps) {
   const { theme } = useTheme();
   const { t, locale } = useI18n();
   // The countdown is the only per-second value in the header.
@@ -197,6 +214,27 @@ function BlockCapsule({ block, peak, className }: BlockCapsuleProps) {
   }
 
   const progress = 1 - remaining / BLOCK_SECONDS;
+  const fiveHour = quota?.fiveHour ?? null;
+  // The predicted 5-hour quota when Claude Desktop's record allows one, else the window's clock.
+  const meter = fiveHour
+    ? {
+        Icon: Gauge,
+        tag: t.header.quotaTag,
+        value: fiveHour.estimatePercent / 100,
+        label: t.header.quotaLabel(Math.round(fiveHour.estimatePercent)),
+        segments: 50,
+        marks: QUOTA_MARKS,
+        color: quotaColor(fiveHour.estimatePercent),
+      }
+    : {
+        Icon: Clock,
+        tag: t.header.elapsedTag,
+        value: progress,
+        label: t.header.elapsed,
+        segments: 60,
+        marks: BLOCK_MARKS,
+        color: undefined,
+      };
   const { hours, minutes, seconds } = splitDuration(remaining);
   const pad = (n: number) => n.toString().padStart(2, "0");
   const start = new Date(block.startTime);
@@ -228,10 +266,16 @@ function BlockCapsule({ block, peak, className }: BlockCapsuleProps) {
           </span>
         </Stat>
         <Stat label={t.header.usedThisBlock}>
-          <span className="num num-hero text-[17px] font-semibold leading-none text-ink">
-            {formatTokens(block.usage.totalTokens)}
-          </span>
-          <span className="ml-1.5 text-[11px] text-ink-3 num">{formatCost(block.usage.costUsd, block.usage.unpricedMessageCount, t.common.unpriced)}</span>
+          <AnimatedNumber
+            className="num num-hero text-[17px] font-semibold leading-none text-ink"
+            value={block.usage.totalTokens}
+            format={formatTokens}
+          />
+          <AnimatedNumber
+            className="ml-1.5 text-[11px] text-ink-3 num"
+            value={block.usage.costUsd}
+            format={(cost) => formatCost(cost, block.usage.unpricedMessageCount, t.common.unpriced)}
+          />
         </Stat>
         <Stat label={t.header.resetsIn}>
           {theme.instrument ? (
@@ -264,19 +308,21 @@ function BlockCapsule({ block, peak, className }: BlockCapsuleProps) {
         </Stat>
       </div>
       {/* Every theme's meter is centred in the same slot, so the capsule is one height in all of them.
-          The tag says the bar is the window's clock, not usage against Claude's plan limit. */}
-      <div className="mt-1.5 flex h-2.5 items-center gap-2" title={t.header.elapsedHint}>
+          The tag names what the bar measures, since only the Swiss dial prints a scale: the predicted
+          quota, or the window's clock, which is not usage. */}
+      <div className={cn("mt-1.5 flex h-2.5 items-center gap-2", fiveHour && quota?.stale && "opacity-60")}>
         <span className="pulse-label flex shrink-0 items-center gap-1 whitespace-nowrap !text-[10px] leading-none">
-          <Clock className="size-2.5" strokeWidth={2} aria-hidden />
-          {t.header.elapsedTag}
-          <span className="num text-ink-2">{formatPercent(progress, 0)}</span>
+          <meter.Icon className="size-2.5" strokeWidth={2} aria-hidden />
+          {meter.tag}
+          <span className="num text-ink-2">{formatPercent(meter.value, 0)}</span>
         </span>
         <Meter
-          value={progress}
-          label={t.header.elapsed}
+          value={meter.value}
+          label={meter.label}
           size="sm"
-          segments={60}
-          marks={BLOCK_MARKS}
+          segments={meter.segments}
+          marks={meter.marks}
+          color={meter.color}
           live
           className="min-w-0 flex-1"
         />

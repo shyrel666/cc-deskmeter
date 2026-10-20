@@ -3,6 +3,7 @@ import { Maximize2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Bar, BarChart, BarStack, ResponsiveContainer, YAxis } from "recharts";
 
+import { useAnimatedNumber } from "../hooks/useAnimatedNumber";
 import { useNow } from "../hooks/useNow";
 import type { FeedStatus } from "../hooks/useUsageData";
 import { HUD_SIZE, startWindowDrag } from "../hooks/useMiniMode";
@@ -68,6 +69,9 @@ function HudBody({ data, status, error, revision, todayKey, onExit }: Omit<MiniH
   const remaining = block ? (Date.parse(block.endTime) - now) / 1000 : 0;
   const live = block !== null && remaining > 0;
   const today = data?.today;
+  // Rolled up when the HUD opens, eased on updates.
+  const todayTokens = useAnimatedNumber(today?.totalTokens ?? 0);
+  const todayCost = useAnimatedNumber(today?.costUsd ?? 0);
 
   // Flash today's total whenever a new response lands.
   const [bump, setBump] = useState(0);
@@ -138,13 +142,13 @@ function HudBody({ data, status, error, revision, todayKey, onExit }: Omit<MiniH
               bump > 0 && "hud-bump",
             )}
           >
-            {today ? formatTokens(today.totalTokens) : "—"}
+            {today ? formatTokens(todayTokens) : "—"}
           </div>
           <div className="pulse-label mt-1 !text-[10px]">{t.mini.tokensToday}</div>
         </div>
         <div className="text-right" title={today?.unpricedMessageCount ? t.app.unpriced(today.unpricedMessageCount) : undefined}>
           <div className="num text-[17px] font-semibold leading-none text-accent">
-            {today ? formatCost(today.costUsd, today.unpricedMessageCount, t.common.unpriced) : "—"}
+            {today ? formatCost(todayCost, today.unpricedMessageCount, t.common.unpriced) : "—"}
           </div>
           <div className="pulse-label mt-1 !text-[10px]">
             {live ? (

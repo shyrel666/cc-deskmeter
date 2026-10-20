@@ -71,13 +71,16 @@ export function DialogTitle({ id, children }: { id: string; children: ReactNode 
   );
 }
 
-export function DialogClose({ label, onClick }: { label: string; onClick: () => void }) {
+export function DialogClose({ label, onClick, className }: { label: string; onClick: () => void; className?: string }) {
   return (
     <button
       type="button"
       onClick={onClick}
       aria-label={label}
-      className="grid size-8 shrink-0 place-items-center text-ink-3 transition-colors hover:text-ink warm:rounded-full warm:hover:bg-raised glass:rounded-full glass:hover:bg-white/10 swiss:rounded-md swiss:hover:bg-raised"
+      className={cn(
+        "grid size-8 shrink-0 place-items-center text-ink-3 transition-colors hover:text-ink warm:rounded-full warm:hover:bg-raised glass:rounded-full glass:hover:bg-white/10 swiss:rounded-md swiss:hover:bg-raised",
+        className,
+      )}
     >
       <X className="size-4" strokeWidth={1.75} aria-hidden />
     </button>

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CC-Deskmeter</title>
+  </head>
+  <!-- The tray icon's panel on Windows (src/tray.tsx). No `data-theme` here: ThemeProvider
+       would take it for the saved theme, which src/tray.tsx applies before the first render. -->
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/tray.tsx"></script>
+  </body>
+</html>

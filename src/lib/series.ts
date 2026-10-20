@@ -1,5 +1,5 @@
 import { LOCALES, MESSAGES, type Lang } from "../i18n/messages";
-import type { ActiveBlock, DailyUsage, ModelUsage, UsageStats } from "../types";
+import type { ActiveBlock, DailyUsage, ModelUsage, MonthlyUsage, UsageStats } from "../types";
 import type { ModelFamily, SeriesKey } from "../theme/themes";
 import { formatClock, parseLocalDate, toLocalDateKey } from "./format";
 
@@ -136,9 +136,19 @@ export function dailyPoints(
   });
 }
 
+/** Per-month totals of `daily`, oldest first: what the backend sends as `monthly`. */
+export function monthlyTotals(daily: DailyUsage[]): MonthlyUsage[] {
+  const byMonth = new Map<string, UsageStats>();
+  for (const day of daily) {
+    const month = day.date.slice(0, 7);
+    byMonth.set(month, addStats(byMonth.get(month) ?? ZERO_STATS, day));
+  }
+  return [...byMonth].map(([month, usage]) => ({ month, ...usage }));
+}
+
 /** Calendar months up to the current one (at most `months`), zero-filled. */
 export function monthlyPoints(
-  daily: DailyUsage[],
+  monthly: MonthlyUsage[],
   todayKey: string,
   stripCacheRead: boolean,
   lang: Lang,
@@ -147,13 +157,9 @@ export function monthlyPoints(
   const locale = LOCALES[lang];
   const monthTick = new Intl.DateTimeFormat(locale, { month: "short" });
   const monthTitle = new Intl.DateTimeFormat(locale, { month: "long", year: "numeric" });
-  const byMonth = new Map<string, UsageStats>();
-  for (const day of daily) {
-    const key = day.date.slice(0, 7);
-    byMonth.set(key, addStats(byMonth.get(key) ?? ZERO_STATS, day));
-  }
+  const byMonth = new Map(monthly.map((row) => [row.month, row]));
   const today = parseLocalDate(todayKey);
-  const first = daily.length > 0 ? parseLocalDate(daily[0].date) : today;
+  const first = monthly.length > 0 ? parseLocalDate(`${monthly[0].month}-01`) : today;
   const span = (today.getFullYear() - first.getFullYear()) * 12 + today.getMonth() - first.getMonth() + 1;
   const count = Math.max(1, Math.min(months, span));
 
@@ -179,19 +185,27 @@ export function sumPoints(points: ChartPoint[]): Breakdown {
 
 export interface DayComparison {
   today: UsageStats;
+  /** All of yesterday. */
   yesterday: UsageStats | null;
-  /** Relative change of total tokens vs. yesterday; null without a baseline. */
+  /** Yesterday up to this time of day: today so far is compared with this, not a whole day. */
+  yesterdaySoFar: UsageStats;
+  /** Relative change of total tokens vs. yesterday so far; null without a baseline. */
   change: number | null;
 }
 
-export function compareWithYesterday(daily: DailyUsage[], today: UsageStats, todayKey: string): DayComparison {
+export function compareWithYesterday(
+  daily: DailyUsage[],
+  today: UsageStats,
+  yesterdaySoFar: UsageStats,
+  todayKey: string,
+): DayComparison {
   const date = parseLocalDate(todayKey);
   date.setDate(date.getDate() - 1);
   const yesterdayKey = toLocalDateKey(date);
   const yesterday = daily.find((day) => day.date === yesterdayKey) ?? null;
-  const change =
-    yesterday && yesterday.totalTokens > 0 ? (today.totalTokens - yesterday.totalTokens) / yesterday.totalTokens : null;
-  return { today, yesterday, change };
+  const base = yesterdaySoFar.totalTokens;
+  const change = base > 0 ? (today.totalTokens - base) / base : null;
+  return { today, yesterday, yesterdaySoFar, change };
 }
 
 export function modelFamily(model: string): ModelFamily {

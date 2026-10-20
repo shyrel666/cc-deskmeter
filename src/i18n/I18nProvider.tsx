@@ -1,4 +1,14 @@
-import { createContext, useCallback, useContext, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { isLang, LOCALES, MESSAGES, type Lang, type Messages } from "./messages";
 
@@ -36,6 +46,21 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   // Before paint, so CJK text is never laid out under the wrong `lang`.
   useLayoutEffect(() => {
     document.documentElement.lang = LOCALES[lang];
+  }, [lang]);
+
+  // A language picked in another window of the app (the dashboard, for the tray panel).
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEY && isLang(event.newValue)) setLangState(event.newValue);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  // The tray's menu and tooltip are drawn by the backend; keep them in the same language.
+  useEffect(() => {
+    if (!isTauri()) return;
+    invoke("set_tray_lang", { lang }).catch((err: unknown) => console.error(err));
   }, [lang]);
 
   // Only an explicit choice is saved; until then the app follows the system language.

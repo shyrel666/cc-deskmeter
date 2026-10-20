@@ -304,7 +304,7 @@ export async function renderShareCard({ data, theme, lang, todayKey }: ShareCard
     ctx.arc(61 + i * 20, 57, 6, 0, Math.PI * 2);
     ctx.fill();
   });
-  text(ctx, "claude-pulse", CARD_WIDTH / 2, 57, `500 14px ${MONO}`, p.ink3, "center", "middle");
+  text(ctx, "cc-deskmeter", CARD_WIDTH / 2, 57, `500 14px ${MONO}`, p.ink3, "center", "middle");
   text(ctx, dateFmt.format(parseLocalDate(todayKey)), F.x + F.w - 28, 57, `500 13px ${MONO}`, p.ink3, "right", "middle");
   hline(ctx, F.x, F.x + F.w, 82, p.frameLine);
 
@@ -316,7 +316,7 @@ export async function renderShareCard({ data, theme, lang, todayKey }: ShareCard
   // Prompt line with a block cursor.
   ctx.font = `500 17px ${MONO}`;
   text(ctx, "$", X0, 116, ctx.font, p.accent, "left", "middle");
-  const cmd = " claude-pulse --share";
+  const cmd = " cc-deskmeter --share";
   text(ctx, cmd, X0 + ctx.measureText("$").width, 116, ctx.font, p.ink2, "left", "middle");
   ctx.fillStyle = p.accent;
   ctx.globalAlpha = 0.85;
@@ -424,7 +424,7 @@ export async function renderShareCard({ data, theme, lang, todayKey }: ShareCard
   text(ctx, t.footer, X0 + 22, 619, `500 13px ${p.body}`, p.ink3, "left", "middle");
   ctx.font = `500 13px ${p.body}`;
   const footerW = ctx.measureText(t.footer).width;
-  text(ctx, "Claude Pulse", X0 + 22 + footerW + 8, 619, `600 15px ${p.wordmark}`, p.ink, "left", "middle");
+  text(ctx, "CC-Deskmeter", X0 + 22 + footerW + 8, 619, `600 15px ${p.wordmark}`, p.ink, "left", "middle");
   text(ctx, data.readErrors.length ? t.incomplete : t.footerRight, CARD_WIDTH - 72, 619, `500 13px ${MONO}`, p.ink3, "right", "middle");
 
   return canvas;
@@ -445,7 +445,7 @@ async function loadFonts() {
     document.fonts.load(`500 14px "JetBrains Mono Variable"`, sample),
     document.fonts.load(`700 48px "Inter Variable"`, sample),
     document.fonts.load(`500 14px "Inter Variable"`, sample),
-    document.fonts.load(`600 15px "Newsreader Variable"`, "Claude Pulse"),
+    document.fonts.load(`600 15px "Newsreader Variable"`, "CC-Deskmeter"),
   ]);
 }
 
@@ -479,7 +479,7 @@ function text(
   ctx.textBaseline = "alphabetic";
 }
 
-/** The Claude Pulse mark in one color, `size` px square with its top-left at (x, y). */
+/** The CC-Deskmeter mark in one color, `size` px square with its top-left at (x, y). */
 function drawMark(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, color: string) {
   ctx.save();
   ctx.translate(x, y);

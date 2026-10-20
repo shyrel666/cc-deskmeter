@@ -3,15 +3,18 @@ import { memo, useLayoutEffect, useRef, useState, type ReactNode, type RefObject
 
 import { useI18n } from "../i18n/I18nProvider";
 import { cn } from "../lib/cn";
-import { formatDelta, formatInteger, formatPercent, formatTokens, formatCost, parseLocalDate } from "../lib/format";
+import { formatClock, formatDelta, formatInteger, formatPercent, formatTokens, formatCost, parseLocalDate } from "../lib/format";
+import { rise } from "../lib/motion";
 import { compareWithYesterday, FAMILY_LABEL, familyShares } from "../lib/series";
 import { useTheme } from "../theme/ThemeProvider";
 import { SERIES_KEYS, seriesSwatch, type ModelFamily, type SeriesKey } from "../theme/themes";
 import type { UsageData, UsageStats } from "../types";
+import { AnimatedNumber } from "./ui/AnimatedNumber";
 import { Card, CardTitle, SeriesKeyMark } from "./ui/Card";
 import { Meter } from "./ui/Meter";
 import { Ring } from "./ui/Ring";
 
+/** The four cards rise in slots 1–4 of the entrance, after the header. */
 export const KpiGrid = memo(function KpiGrid({ data, todayKey }: { data: UsageData; todayKey: string }) {
   return (
     <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -30,7 +33,7 @@ function Hero({ children, className }: { children: ReactNode; className?: string
         "num num-hero font-semibold leading-none text-ink",
         "warm:text-[34px] warm:font-medium",
         "swiss:text-[32px]",
-        "glass:text-[36px] glass:font-semibold",
+        "glass:text-[32px] glass:font-semibold",
         className,
       )}
     >
@@ -69,15 +72,22 @@ function TotalCard({ data }: { data: UsageData }) {
   const { theme } = useTheme();
   const { t, locale } = useI18n();
   const { total } = data;
-  const since = data.daily[0]?.date;
+  const since = data.firstDay;
   return (
-    <Card className="flex flex-col">
+    <Card className="intro-rise flex flex-col" style={rise(1)}>
       <CardTitle tag="SYS.METRIC" icon={Database}>
         {t.kpi.totalTokens}
       </CardTitle>
-      <Hero className="mt-4">{formatTokens(total.totalTokens)}</Hero>
+      <Hero className="mt-4">
+        <AnimatedNumber value={total.totalTokens} format={formatTokens} />
+      </Hero>
       <p className="mt-2 text-[12.5px] text-ink-2">
-        <span className="num text-ink">{formatCost(total.costUsd, total.unpricedMessageCount, t.common.unpriced)}</span> {t.kpi.apiEquivalent}
+        <AnimatedNumber
+          className="num text-ink"
+          value={total.costUsd}
+          format={(cost) => formatCost(cost, total.unpricedMessageCount, t.common.unpriced)}
+        />{" "}
+        {t.kpi.apiEquivalent}
       </p>
 
       {/* Composition: how much of the total each token type is. */}
@@ -112,7 +122,12 @@ function TotalCard({ data }: { data: UsageData }) {
 function TodayCard({ data, todayKey }: { data: UsageData; todayKey: string }) {
   const { theme } = useTheme();
   const { t } = useI18n();
-  const { today, yesterday, change } = compareWithYesterday(data.daily, data.today, todayKey);
+  const { today, yesterday, yesterdaySoFar, change } = compareWithYesterday(
+    data.daily,
+    data.today,
+    data.yesterdaySoFar,
+    todayKey,
+  );
   const TrendIcon = change === null || Math.abs(change) < 0.005 ? Minus : change > 0 ? ArrowUpRight : ArrowDownRight;
   const delta = change === null ? t.kpi.noBaseline : formatDelta(change);
   const badge = useRef<HTMLSpanElement>(null);
@@ -120,7 +135,7 @@ function TodayCard({ data, todayKey }: { data: UsageData; todayKey: string }) {
   const suffixFits = useSuffixFits(badge, suffix, [theme.id, t, delta]);
 
   return (
-    <Card className="flex flex-col">
+    <Card className="intro-rise flex flex-col" style={rise(2)}>
       <CardTitle
         tag="TODAY.IO"
         icon={CalendarDays}
@@ -133,7 +148,13 @@ function TodayCard({ data, todayKey }: { data: UsageData; todayKey: string }) {
               "swiss:rounded-[4px] swiss:border swiss:border-line swiss:bg-raised swiss:text-ink-2",
               "glass:rounded-full glass:bg-white/[0.06] glass:text-ink-2",
             )}
-            title={yesterday ? t.kpi.vsYesterday(formatTokens(yesterday.totalTokens)) : t.kpi.noUsageYesterday}
+            title={
+              change !== null
+                ? t.kpi.vsYesterday(formatTokens(yesterdaySoFar.totalTokens), formatTokens(yesterday?.totalTokens ?? 0))
+                : yesterday && yesterday.totalTokens > 0
+                  ? t.kpi.noUsageYesterdayYet
+                  : t.kpi.noUsageYesterday
+            }
           >
             <TrendIcon className="size-3" strokeWidth={2} aria-hidden />
             {delta}
@@ -147,15 +168,22 @@ function TodayCard({ data, todayKey }: { data: UsageData; todayKey: string }) {
       >
         {t.kpi.todaysUsage}
       </CardTitle>
-      <Hero className="mt-4">{formatTokens(today.totalTokens)}</Hero>
+      <Hero className="mt-4">
+        <AnimatedNumber value={today.totalTokens} format={formatTokens} />
+      </Hero>
       <p className="mt-2 text-[12.5px] text-ink-2">
-        <span className="num text-ink">{formatCost(today.costUsd, today.unpricedMessageCount, t.common.unpriced)}</span> {t.kpi.today} ·{" "}
+        <AnimatedNumber
+          className="num text-ink"
+          value={today.costUsd}
+          format={(cost) => formatCost(cost, today.unpricedMessageCount, t.common.unpriced)}
+        />{" "}
+        {t.kpi.today} ·{" "}
         <span className="num">{formatInteger(today.messageCount)}</span> {t.common.responses}
       </p>
 
       <div className="mt-4 space-y-2">
-        <IoRow label={t.series.input} value={today.inputTokens} reference={yesterday?.inputTokens} color={theme.chart.series.input} />
-        <IoRow label={t.series.output} value={today.outputTokens} reference={yesterday?.outputTokens} color={theme.chart.series.output} />
+        <IoRow label={t.series.input} value={today.inputTokens} reference={yesterdaySoFar.inputTokens} color={theme.chart.series.input} />
+        <IoRow label={t.series.output} value={today.outputTokens} reference={yesterdaySoFar.outputTokens} color={theme.chart.series.output} />
       </div>
       <div className="mt-auto space-y-1.5 border-t border-line pt-3">
         <Row label={t.series.cacheWrite} value={formatTokens(today.cacheCreationTokens)} />
@@ -224,14 +252,14 @@ function CacheCard({ data }: { data: UsageData }) {
   const { total, today } = data;
   const prompt = total.inputTokens + total.cacheCreationTokens + total.cacheReadTokens;
   return (
-    <Card className="flex flex-col">
+    <Card className="intro-rise flex flex-col" style={rise(3)}>
       <CardTitle tag="CACHE.HIT" icon={Zap}>
         {t.kpi.cacheHit}
       </CardTitle>
       <div className="mt-4 flex items-center gap-5">
         <Ring value={total.cacheHitRatio} label={t.kpi.cacheHit}>
           <div className="num num-hero text-[22px] font-semibold leading-none text-ink swiss:text-[19px]">
-            {formatPercent(total.cacheHitRatio)}
+            <AnimatedNumber value={total.cacheHitRatio} format={formatPercent} />
           </div>
           <div className="pulse-label mt-1">{t.kpi.allTime}</div>
         </Ring>
@@ -241,14 +269,127 @@ function CacheCard({ data }: { data: UsageData }) {
           <Row label={t.common.today} value={formatPercent(today.cacheHitRatio)} />
         </div>
       </div>
-      <p className="mt-auto pt-4 text-[11.5px] leading-relaxed text-ink-3">
-        {t.kpi.cacheExplain}
-      </p>
+      <CacheFormula readPrice={data.cacheReadPrice} />
     </Card>
   );
 }
 
+/** The cache formula's variables, each tied to its chart series. */
+const FORMULA_TERMS = [
+  { series: "input", symbol: "I" },
+  { series: "cacheWrite", symbol: "W" },
+  { series: "cacheRead", symbol: "R" },
+] as const satisfies readonly { series: SeriesKey; symbol: string }[];
+
+/**
+ * The hit ratio as typeset maths, with how cache reads are billed beside it:
+ * `readPrice` is their price as a share of input over the models used (5% on
+ * Opus 5.5, 10% on Sonnet 5.5); without priced reads the note is left out.
+ */
+function CacheFormula({ readPrice }: { readPrice: number | null }) {
+  const { t } = useI18n();
+  const [input, write, read] = FORMULA_TERMS;
+  const op = (sign: string) => <span className="math-op mx-[0.3em]">{sign}</span>;
+  // Two significant digits: 0.05, 0.1, 0.025.
+  const factor = readPrice === null ? null : Number(readPrice.toPrecision(2));
+  return (
+    <figure
+      className="mt-auto pt-4"
+      aria-label={t.kpi.cacheExplain(factor === null ? null : `${Number((factor * 100).toPrecision(2))}%`)}
+    >
+      {/* Neither side ever wraps inside; short of room, the billing note moves below. */}
+      <div aria-hidden className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
+        <div className="pulse-math flex shrink-0 items-center whitespace-nowrap text-[15px] text-ink">
+          <span className="math-op mr-[0.45em] text-[12.5px] !text-ink-2">{t.kpi.hitSymbol}</span>
+          {op("=")}
+          <span className="ml-[0.2em] inline-flex flex-col items-center">
+            <span className="px-1 pb-[7px]">
+              <Variable {...read} />
+            </span>
+            <span className="h-px w-full bg-ink-3" />
+            <span className="px-1 pb-[3px] pt-[5px]">
+              <Variable {...input} />
+              {op("+")}
+              <Variable {...write} />
+              {op("+")}
+              <Variable {...read} />
+            </span>
+          </span>
+        </div>
+        {factor !== null && (
+          <div className="ml-auto whitespace-nowrap text-right">
+            <div className="pulse-label">{t.kpi.pricing}</div>
+            <div className="pulse-math mt-1.5 text-[14px] text-ink-2">
+              p<sub className="text-[0.65em]">{read.symbol}</sub>
+              {op("=")}
+              <span className="math-op !text-ink-2">{factor}</span>
+              {op("·")}p<sub className="text-[0.65em]">{input.symbol}</sub>
+            </div>
+          </div>
+        )}
+      </div>
+      {/* The key repeats each letter as the formula sets it, so it stays on one line in both
+          languages at the narrowest four-column width; spread to the formula's edges. */}
+      <figcaption aria-hidden className="mt-3 flex flex-wrap justify-between gap-x-3 gap-y-1 text-[11px] text-ink-3">
+        {FORMULA_TERMS.map((term) => (
+          <span key={term.series} className="flex items-baseline gap-1.5 whitespace-nowrap">
+            <span className="pulse-math text-[12px] text-ink-2">
+              <Variable {...term} />
+            </span>
+            {t.series[term.series]}
+          </span>
+        ))}
+      </figcaption>
+    </figure>
+  );
+}
+
+/** A formula letter underlined in its series colour. */
+function Variable({ series, symbol }: { series: SeriesKey; symbol: string }) {
+  const { theme } = useTheme();
+  // The cache-read fill is too faint for a hairline in some themes; its stroke colour isn't.
+  const color = series === "cacheRead" ? theme.chart.cacheReadStroke : theme.chart.series[series];
+  return (
+    <span className="relative inline-block px-[0.08em]">
+      {symbol}
+      <span className="absolute inset-x-0 -bottom-[3px] h-[2px] rounded-full swiss:rounded-none" style={{ background: color }} />
+    </span>
+  );
+}
+
 /* 4 · Burn rate & models --------------------------------------------------- */
+/**
+ * When the 5-hour quota runs out at the pace of the last 30 minutes (the
+ * backend's window, not the block-average burn rate shown above). Without Claude Desktop's readings to convert spend into %, it
+ * falls back to the block's projected tokens and cost.
+ */
+function QuotaOutlook({ data }: { data: UsageData }) {
+  const { t } = useI18n();
+  const block = data.activeBlock;
+  const fiveHour = data.quota?.fiveHour ?? null;
+
+  if (!block) return <>{t.kpi.idle}</>;
+  if (fiveHour && fiveHour.estimatePercent >= 100) return <span className="text-danger">{t.kpi.quotaFull}</span>;
+  if (fiveHour && fiveHour.minutesToLimit !== null) {
+    const at = new Date(Date.parse(data.generatedAt) + fiveHour.minutesToLimit * 60_000);
+    const [before, after] = t.kpi.quotaFullAt;
+    return (
+      <>
+        {before}
+        <span className="num font-semibold text-accent">{formatClock(at)}</span>
+        {after}
+      </>
+    );
+  }
+  if (fiveHour?.calibrated) return <>{t.kpi.quotaLasts}</>;
+  return (
+    <>
+      {t.kpi.projected} <span className="num text-ink-2">{formatTokens(block.projected.totalTokens)}</span> ·{" "}
+      <span className="num text-ink-2">{formatCost(block.projected.costUsd, block.usage.unpricedMessageCount, t.common.unpriced)}</span>
+    </>
+  );
+}
+
 function BurnCard({ data }: { data: UsageData }) {
   const { theme } = useTheme();
   const { t } = useI18n();
@@ -258,31 +399,31 @@ function BurnCard({ data }: { data: UsageData }) {
   const familyLabel = (family: ModelFamily) => (family === "other" ? t.kpi.otherFamily : FAMILY_LABEL[family]);
 
   return (
-    <Card className="flex flex-col">
+    <Card className="intro-rise flex flex-col" style={rise(4)}>
       <CardTitle tag="BURN_RATE" icon={Gauge}>
         {t.kpi.burnTitle}
       </CardTitle>
       <div className="mt-4 flex items-end gap-4">
         <div>
-          <Hero>{block ? formatTokens(block.burnRate.tokensPerMinute) : "—"}</Hero>
+          <Hero>{block ? <AnimatedNumber value={block.burnRate.tokensPerMinute} format={formatTokens} /> : "—"}</Hero>
           <div className="pulse-label mt-2">{t.kpi.tokensPerMin}</div>
         </div>
         <div className="pb-0.5">
           <div className="num text-[18px] font-semibold leading-none text-accent">
-            {block ? formatCost(block.burnRate.costPerHour, block.usage.unpricedMessageCount, t.common.unpriced) : "—"}
+            {block ? (
+              <AnimatedNumber
+                value={block.burnRate.costPerHour}
+                format={(cost) => formatCost(cost, block.usage.unpricedMessageCount, t.common.unpriced)}
+              />
+            ) : (
+              "—"
+            )}
           </div>
           <div className="pulse-label mt-2">{t.kpi.perHour}</div>
         </div>
       </div>
       <p className="mt-2 text-[11.5px] text-ink-3">
-        {block ? (
-          <>
-            {t.kpi.projected} <span className="num text-ink-2">{formatTokens(block.projected.totalTokens)}</span> ·{" "}
-            <span className="num text-ink-2">{formatCost(block.projected.costUsd, block.usage.unpricedMessageCount, t.common.unpriced)}</span>
-          </>
-        ) : (
-          t.kpi.idle
-        )}
+        <QuotaOutlook data={data} />
       </p>
 
       <div className="mt-4">

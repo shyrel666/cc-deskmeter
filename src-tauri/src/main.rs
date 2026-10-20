@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    claude_pulse_lib::run()
+    cc_deskmeter_lib::run()
 }

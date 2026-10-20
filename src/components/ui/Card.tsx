@@ -6,7 +6,7 @@ import { useTheme } from "../../theme/ThemeProvider";
 
 export function Card({ className, children, ...rest }: HTMLAttributes<HTMLElement>) {
   return (
-    <section className={cn("pulse-card min-w-0 p-5 glass:p-6", className)} {...rest}>
+    <section className={cn("pulse-card min-w-0 p-5", className)} {...rest}>
       {children}
     </section>
   );
@@ -32,7 +32,7 @@ export function CardTitle({ tag, icon: Icon, children, aside, className }: CardT
             "grid shrink-0 place-items-center",
             "warm:text-accent",
             "swiss:size-6 swiss:rounded-[5px] swiss:key-cap swiss:text-ink-2",
-            "glass:size-7 glass:rounded-[10px] glass:border glass:border-white/[0.08] glass:bg-white/[0.06] glass:text-ink glass:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]",
+            "glass:size-6 glass:rounded-[8px] glass:border glass:border-white/[0.08] glass:bg-white/[0.06] glass:text-ink glass:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]",
           )}
         >
           <Icon className="size-4 swiss:size-3.5 glass:size-3.5" strokeWidth={1.75} aria-hidden />

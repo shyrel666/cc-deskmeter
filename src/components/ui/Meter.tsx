@@ -1,5 +1,7 @@
 import { cn } from "../../lib/cn";
+import { chargeTransition, sweepDelay } from "../../lib/motion";
 import { useTheme } from "../../theme/ThemeProvider";
+import { useCharge } from "../IntroStage";
 
 interface MeterProps {
   /** 0..1 */
@@ -7,7 +9,7 @@ interface MeterProps {
   /** Accessible name. */
   label: string;
   size?: "sm" | "md";
-  /** Single colour instead of the theme's default fill (e.g. share bars). */
+  /** Single colour instead of the theme's default fill (e.g. share bars); on the dial scale, the needle's. */
   color?: string;
   /** Minor tick divisions on the Swiss Industrial dial scale. */
   segments?: number;
@@ -25,11 +27,14 @@ interface MeterProps {
 /**
  * Progress bar that changes form with the theme: a soft rounded bar (Claude
  * Warm), a groove cut into the panel or a radio-dial scale with a needle
- * (Swiss Industrial), or a glowing gradient capsule (Glass Bento).
+ * (Swiss Industrial), or a glowing gradient capsule (Glass Bento). It charges
+ * up from empty when its view opens.
  */
 export function Meter({ value, label, size = "md", color, segments = 32, marks, live = false, className }: MeterProps) {
   const { theme } = useTheme();
   const clamped = Math.min(1, Math.max(0, Number.isFinite(value) ? value : 0));
+  const { value: drawn, charging } = useCharge(clamped);
+  const fill = charging ? chargeTransition("width") : undefined;
   const aria = {
     role: "meter",
     "aria-label": label,
@@ -42,7 +47,7 @@ export function Meter({ value, label, size = "md", color, segments = 32, marks, 
     if (marks && marks.length > 1) {
       return (
         <div {...aria} className={cn("w-full", className)}>
-          <DialScale value={clamped} marks={marks} divisions={segments} />
+          <DialScale value={drawn} target={clamped} charging={charging} marks={marks} divisions={segments} color={color} />
         </div>
       );
     }
@@ -53,7 +58,7 @@ export function Meter({ value, label, size = "md", color, segments = 32, marks, 
       >
         <div
           className="h-full transition-[width] duration-700 ease-out"
-          style={{ width: `${clamped * 100}%`, background: color ?? "var(--pulse-accent)" }}
+          style={{ width: `${drawn * 100}%`, background: color ?? "var(--pulse-accent)", transition: fill }}
         />
       </div>
     );
@@ -72,9 +77,10 @@ export function Meter({ value, label, size = "md", color, segments = 32, marks, 
         <div
           className="relative h-full overflow-hidden rounded-full transition-[width] duration-700 ease-out"
           style={{
-            width: `${clamped * 100}%`,
+            width: `${drawn * 100}%`,
             background: color ?? "linear-gradient(90deg, #8B5CF6 0%, #3B82F6 100%)",
             boxShadow: `0 0 12px -2px ${color ?? "rgba(139, 92, 246, 0.8)"}`,
+            transition: fill,
           }}
         >
           {live && (
@@ -92,7 +98,7 @@ export function Meter({ value, label, size = "md", color, segments = 32, marks, 
     <div {...aria} className={cn("w-full overflow-hidden rounded-full bg-track", size === "sm" ? "h-1" : "h-1.5", className)}>
       <div
         className="h-full rounded-full transition-[width] duration-700 ease-out"
-        style={{ width: `${clamped * 100}%`, background: color ?? "var(--pulse-accent)" }}
+        style={{ width: `${drawn * 100}%`, background: color ?? "var(--pulse-accent)", transition: fill }}
       />
     </div>
   );
@@ -103,12 +109,24 @@ const DIAL_INSET = 5;
 /** Kept as slim as the other themes' bars so the header capsule matches their height. */
 const DIAL_HEIGHT = 10;
 
+interface DialScaleProps {
+  /** Where the needle is drawn: 0 until the meter charges, then `target`. */
+  value: number;
+  target: number;
+  /** Sweeping up from 0 on the entrance curve; the ticks light up as the needle passes. */
+  charging: boolean;
+  marks: string[];
+  divisions: number;
+  color?: string;
+}
+
 /**
  * Tuning-dial scale of a Braun radio: fine ticks cut into a groove (tall at
- * every mark, medium halfway), ink where time has passed, and an orange needle.
- * The first and last mark are printed at the ends, on the same line.
+ * every mark, medium halfway), ink where time has passed, and an orange needle
+ * (or `color`, e.g. a warning). The first and last mark are printed at the
+ * ends, on the same line.
  */
-function DialScale({ value, marks, divisions }: { value: number; marks: string[]; divisions: number }) {
+function DialScale({ value, target, charging, marks, divisions, color }: DialScaleProps) {
   const majorEvery = Math.max(1, Math.round(divisions / (marks.length - 1)));
   const position = `calc(${DIAL_INSET}px + (100% - ${DIAL_INSET * 2}px) * ${value})`;
   const endLabel = "num shrink-0 text-[9px] leading-none text-ink-3";
@@ -122,7 +140,7 @@ function DialScale({ value, marks, divisions }: { value: number; marks: string[]
         {/* Elapsed part of the window. */}
         <div
           className="absolute inset-y-0 left-0 rounded-l-[3px] bg-ink/[0.05] transition-[width] duration-1000 ease-linear"
-          style={{ width: position }}
+          style={{ width: position, transition: charging ? chargeTransition("width") : undefined }}
         />
         <svg
           className="absolute inset-y-0 overflow-visible"
@@ -135,6 +153,7 @@ function DialScale({ value, marks, divisions }: { value: number; marks: string[]
             const half = !major && majorEvery % 2 === 0 && i % (majorEvery / 2) === 0;
             const length = major ? 6 : half ? 4 : 2.5;
             const passed = i / divisions <= value;
+            const lit = charging ? sweepDelay(i / divisions, target) : 0;
             return (
               <line
                 key={i}
@@ -142,8 +161,11 @@ function DialScale({ value, marks, divisions }: { value: number; marks: string[]
                 x2={x}
                 y1={DIAL_HEIGHT - 2}
                 y2={DIAL_HEIGHT - 2 - length}
-                stroke={passed ? "#111110" : "#A3A39A"}
-                strokeOpacity={passed && !major ? 0.7 : 1}
+                style={{
+                  stroke: passed ? "#111110" : "#A3A39A",
+                  strokeOpacity: passed && !major ? 0.7 : 1,
+                  transition: charging ? `${chargeTransition("stroke", lit, 120)}, ${chargeTransition("stroke-opacity", lit, 120)}` : undefined,
+                }}
                 strokeWidth={1}
                 shapeRendering="crispEdges"
               />
@@ -152,8 +174,11 @@ function DialScale({ value, marks, divisions }: { value: number; marks: string[]
         </svg>
         {/* Needle. */}
         <div
-          className="absolute -bottom-[2px] -top-[2px] w-[2px] -translate-x-1/2 rounded-full bg-accent shadow-[0_0_0_1px_rgba(255,79,0,0.12),0_1px_4px_rgba(255,79,0,0.5)] transition-[left] duration-1000 ease-linear"
-          style={{ left: position }}
+          className={cn(
+            "absolute -bottom-[2px] -top-[2px] w-[2px] -translate-x-1/2 rounded-full transition-[left] duration-1000 ease-linear",
+            !color && "bg-accent shadow-[0_0_0_1px_rgba(255,79,0,0.12),0_1px_4px_rgba(255,79,0,0.5)]",
+          )}
+          style={{ left: position, background: color, transition: charging ? chargeTransition("left") : undefined }}
         />
       </div>
       <span className={endLabel} aria-hidden>

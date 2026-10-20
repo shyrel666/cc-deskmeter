@@ -6,9 +6,10 @@ import { useEffect, useState } from "react";
 import { useI18n } from "../i18n/I18nProvider";
 import type { Lang } from "../i18n/messages";
 import { cn } from "../lib/cn";
+import { makeDemoHistory } from "../lib/demo";
 import { CARD_HEIGHT, CARD_WIDTH, canvasToPng, renderShareCard } from "../lib/shareCard";
 import { useTheme } from "../theme/ThemeProvider";
-import type { UsageData } from "../types";
+import type { ArchiveSummary, UsageData } from "../types";
 import { Button } from "./ui/Button";
 import { Dialog, DialogClose, DialogTitle } from "./ui/Dialog";
 import { Segmented, type SegmentOption } from "./ui/Segmented";
@@ -27,18 +28,36 @@ function errorText(err: unknown) {
 function fileName() {
   const d = new Date();
   const pad = (n: number) => n.toString().padStart(2, "0");
-  return `claude-pulse-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.png`;
+  return `cc-deskmeter-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.png`;
 }
 
 /**
  * Previews the share card and exports it as a PNG (clipboard or file). The
  * stats are frozen when the dialog opens; switching theme (T) or language
- * re-renders the card.
+ * re-renders the card. Its records and activity heatmap span every day,
+ * which only the archive summary carries (a snapshot has the recent ones).
  */
 export function ShareDialog({ data, todayKey, onClose }: { data: UsageData; todayKey: string; onClose: () => void }) {
   const { theme } = useTheme();
   const { t, lang: appLang } = useI18n();
-  const [snapshot] = useState(data);
+  const [opened] = useState(data);
+  const [snapshot, setSnapshot] = useState<UsageData | null>(() =>
+    isTauri() ? null : { ...opened, daily: makeDemoHistory(new Date(opened.generatedAt)) },
+  );
+  useEffect(() => {
+    if (!isTauri()) return;
+    let live = true;
+    invoke<ArchiveSummary>("get_archive_summary")
+      .then((summary) => live && setSnapshot({ ...opened, daily: summary.daily }))
+      .catch((err: unknown) => {
+        // The recent days still make a card.
+        console.error(err);
+        if (live) setSnapshot(opened);
+      });
+    return () => {
+      live = false;
+    };
+  }, [opened]);
   // Starts in the app's language; switching it here changes only the card.
   const [lang, setLang] = useState<Lang>(appLang);
   const [card, setCard] = useState<{ blob: Blob; url: string } | null>(null);
@@ -47,6 +66,7 @@ export function ShareDialog({ data, todayKey, onClose }: { data: UsageData; toda
   const [notice, setNotice] = useState<Notice>(null);
 
   useEffect(() => {
+    if (!snapshot) return;
     let cancelled = false;
     setRendering(true);
     renderShareCard({ data: snapshot, theme, lang, todayKey })

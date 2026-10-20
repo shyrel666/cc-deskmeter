@@ -132,7 +132,7 @@ pub fn parse_context(line: &str) -> Option<RecordContext> {
 mod tests {
     use super::*;
 
-    const ASSISTANT: &str = r#"{"parentUuid":"c32a","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_011","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":22224,"cache_read_input_tokens":44148,"output_tokens":447,"cache_creation":{"ephemeral_1h_input_tokens":22224,"ephemeral_5m_input_tokens":0},"speed":"standard"}},"requestId":"req_011","type":"assistant","timestamp":"2026-10-17T14:06:22.358Z","cwd":"D:\\Pycharm Project\\claude-pulse","sessionId":"f056a8b2"}"#;
+    const ASSISTANT: &str = r#"{"parentUuid":"c32a","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_011","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":22224,"cache_read_input_tokens":44148,"output_tokens":447,"cache_creation":{"ephemeral_1h_input_tokens":22224,"ephemeral_5m_input_tokens":0},"speed":"standard"}},"requestId":"req_011","type":"assistant","timestamp":"2026-10-17T14:06:22.358Z","cwd":"D:\\Pycharm Project\\cc-deskmeter","sessionId":"f056a8b2"}"#;
 
     #[test]
     fn parses_assistant_usage_line() {
@@ -142,7 +142,7 @@ mod tests {
         assert_eq!(parsed.session_id.as_deref(), Some("f056a8b2"));
         assert_eq!(
             parsed.cwd.as_deref(),
-            Some(r"D:\Pycharm Project\claude-pulse")
+            Some(r"D:\Pycharm Project\cc-deskmeter")
         );
         assert_eq!(parsed.model, "claude-opus-5-5");
         assert_eq!(parsed.tokens.total(), 2 + 447 + 22224 + 44148);

@@ -31,7 +31,7 @@ export function AboutDialog({ onClose }: { onClose: () => void }) {
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h2 id="about-title" className="pulse-wordmark">
-                <span className="wm-claude">Claude</span> <span className="wm-pulse">Pulse</span>
+                <span className="wm-cc">cc</span> <span className="wm-meter">deskmeter</span>
               </h2>
               <span className="pulse-version num">v{APP_VERSION}</span>
             </div>
@@ -70,9 +70,24 @@ export function AboutDialog({ onClose }: { onClose: () => void }) {
       )}
 
       <div className="mt-4 space-y-1 border-t border-line pt-3.5 text-center text-[11.5px] text-ink-3">
-        <p className="flex items-center justify-center gap-1.5">
-          <ShieldCheck className="size-3.5 shrink-0" strokeWidth={1.75} aria-hidden />
-          {t.about.privacy}
+        {/* Each sentence is an unbreakable unit, so a long locale wraps between
+            sentences (never mid "cc-deskmeter"), with the icon leading the first. */}
+        <p className="leading-relaxed">
+          {t.about.privacy.split(/(?<=\.)\s+/).map((sentence, i) => (
+            <span key={i}>
+              {i > 0 && " "}
+              <span className="inline-block">
+                {i === 0 && (
+                  <ShieldCheck
+                    className="mr-1.5 inline-block size-3.5 -translate-y-px align-middle"
+                    strokeWidth={1.75}
+                    aria-hidden
+                  />
+                )}
+                {sentence}
+              </span>
+            </span>
+          ))}
         </p>
         <p>
           {t.about.license} · {t.about.copyright}

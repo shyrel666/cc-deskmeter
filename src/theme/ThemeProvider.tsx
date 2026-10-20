@@ -1,3 +1,6 @@
+import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { DEFAULT_THEME, isThemeId, THEME_IDS, THEMES, type ThemeDefinition, type ThemeId } from "./themes";
@@ -32,8 +35,23 @@ function isTypingTarget(target: EventTarget | null): boolean {
   );
 }
 
-export function ThemeProvider({ children }: { children: ReactNode }) {
+interface ThemeProviderProps {
+  /** Alt/⌥ + 1·2·3 and `T` switch the theme (the dashboard; not the tray panel). */
+  hotkeys?: boolean;
+  children: ReactNode;
+}
+
+export function ThemeProvider({ hotkeys = true, children }: ThemeProviderProps) {
   const [themeId, setThemeId] = useState<ThemeId>(readStoredTheme);
+
+  // A theme picked in another window of the app (the dashboard, for the tray panel).
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEY && isThemeId(event.newValue)) setThemeId(event.newValue);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeId;
@@ -41,6 +59,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       localStorage.setItem(STORAGE_KEY, themeId);
     } catch {
       // Not fatal: the theme just won't persist.
+    }
+    // What shows behind the page while the window resizes (index.html sets it at startup).
+    if (isTauri()) {
+      const canvas = THEMES[themeId].canvas;
+      Promise.all([getCurrentWindow().setBackgroundColor(canvas), getCurrentWebview().setBackgroundColor(canvas)]).catch(
+        (err: unknown) => console.error(err),
+      );
     }
   }, [themeId]);
 
@@ -50,6 +75,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   // Alt/⌥ + 1·2·3 selects a theme; plain `T` cycles.
   useEffect(() => {
+    if (!hotkeys) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || isTypingTarget(event.target)) return;
       if (event.altKey && !event.ctrlKey && !event.metaKey) {
@@ -67,7 +93,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [cycleTheme]);
+  }, [hotkeys, cycleTheme]);
 
   const value = useMemo(
     () => ({ theme: THEMES[themeId], setTheme: setThemeId, cycleTheme }),

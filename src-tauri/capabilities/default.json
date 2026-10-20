@@ -9,10 +9,13 @@
     {
       "identifier": "opener:allow-open-url",
       "allow": [
-        { "url": "https://github.com/shyrel666/claude-pulse" },
-        { "url": "https://github.com/shyrel666/claude-pulse/*" }
+        { "url": "https://github.com/shyrel666/cc-deskmeter" },
+        { "url": "https://github.com/shyrel666/cc-deskmeter/*" }
       ]
     },
+    "core:window:allow-show",
+    "core:window:allow-set-background-color",
+    "core:webview:allow-set-webview-background-color",
     "core:window:allow-set-size",
     "core:window:allow-set-min-size",
     "core:window:allow-set-position",

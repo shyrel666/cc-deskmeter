@@ -48,6 +48,11 @@ export interface ThemeDefinition {
   hotkey: string;
   meter: MeterStyle;
   /**
+   * Page background (`--pulse-bg`), also given to the native window and webview so a
+   * resize or a cold start never flashes another colour. Mirrored in index.html.
+   */
+  canvas: string;
+  /**
    * Hardware-panel readouts: part-number tags such as `SYS.METRIC` beside card
    * titles, zero-padded ranks and hh:mm:ss countdowns.
    */
@@ -77,6 +82,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     icon: Feather,
     hotkey: "1",
     meter: "smooth",
+    canvas: "#141413",
     instrument: false,
     chart: {
       series: {
@@ -113,6 +119,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     icon: RadioReceiver,
     hotkey: "2",
     meter: "scale",
+    canvas: "#eaeae6",
     instrument: true,
     chart: {
       series: {
@@ -149,6 +156,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     icon: LayoutGrid,
     hotkey: "3",
     meter: "glow",
+    canvas: "#09090b",
     instrument: false,
     chart: {
       series: {

@@ -172,13 +172,15 @@ async function capture(page) {
     await sleep(SETTLE_MS);
     write(`dashboard-${theme}.png`, await screenshot());
 
-    // The same renderer and demo data the Share dialog uses, at the size it exports.
+    // The same renderer and demo data the Share dialog uses (every day, not just the
+    // snapshot's recent ones), at the size it exports.
     const card = await evaluate(`(async () => {
-      const [{ renderShareCard }, { THEMES }, { makeDemoData }, { toLocalDateKey }] = await Promise.all([
+      const [{ renderShareCard }, { THEMES }, { makeDemoData, makeDemoHistory }, { toLocalDateKey }] = await Promise.all([
         import("/src/lib/shareCard.ts"), import("/src/theme/themes.ts"), import("/src/lib/demo.ts"), import("/src/lib/format.ts"),
       ]);
       const now = new Date();
-      const canvas = await renderShareCard({ data: makeDemoData(now), theme: THEMES["${theme}"], lang: "en", todayKey: toLocalDateKey(now) });
+      const data = { ...makeDemoData(now), daily: makeDemoHistory(now) };
+      const canvas = await renderShareCard({ data, theme: THEMES["${theme}"], lang: "en", todayKey: toLocalDateKey(now) });
       return canvas.toDataURL("image/png").split(",")[1];
     })()`);
     write(`share-card-${theme}.png`, card);
@@ -209,7 +211,7 @@ if (!executable) fail("No Chrome or Edge found. Pass --browser <path>.");
 if (!(await fetch(APP).then((res) => res.ok, () => false))) fail(`Nothing at ${APP}. Start the dev server first: npm run dev`);
 
 mkdirSync(OUT, { recursive: true });
-const profile = mkdtempSync(join(tmpdir(), "claude-pulse-shots-"));
+const profile = mkdtempSync(join(tmpdir(), "cc-deskmeter-shots-"));
 const browser = spawn(
   executable,
   [

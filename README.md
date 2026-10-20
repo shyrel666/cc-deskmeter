@@ -1,16 +1,16 @@
 <div align="center">
 
-<img src="docs/brand/app-icon.svg" width="112" alt="Claude Pulse logo" />
+<img src="docs/brand/app-icon.svg" width="112" alt="CC-Deskmeter logo" />
 
-# Claude Pulse
+# CC-Deskmeter
 
-**Real-time token & cost HUD for Claude Code. 100% offline, privacy-first.**
+**Real-time token, cost & weekly-limit HUD for Claude Code Desktop. 100% offline.**
 
-Brings back the token chart that newer Claude Code Desktop builds dropped:<br />
-5-hour window countdown, burn rate, cache hit ratio and API-equivalent cost, live from the transcripts already on your disk.
+Brings back the token chart that newer Claude Code Desktop builds dropped, and sees the weekly limit coming:<br />
+5-hour window countdown, burn rate, cache hit ratio, API-equivalent cost and a weekly-limit forecast, all read from files already on your computer.
 
 <p>
-  <a href="https://github.com/shyrel666/claude-pulse/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/shyrel666/claude-pulse?label=release" /></a>
+  <a href="https://github.com/shyrel666/cc-deskmeter/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/shyrel666/cc-deskmeter?label=release" /></a>
   <img alt="Tauri v2" src="https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white" />
   <img alt="Rust" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white" />
   <img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black" />
@@ -21,7 +21,7 @@ Brings back the token chart that newer Claude Code Desktop builds dropped:<br />
 
 **English** · [简体中文](README.zh-CN.md)
 
-<img src="docs/screenshots/dashboard-claude-warm.png" alt="Claude Pulse dashboard in the Claude Warm theme" width="100%" />
+<img src="docs/screenshots/dashboard-claude-warm.png" alt="CC-Deskmeter dashboard in the Claude Warm theme" width="100%" />
 
 </div>
 
@@ -29,7 +29,7 @@ Brings back the token chart that newer Claude Code Desktop builds dropped:<br />
 
 ## Download
 
-Grab the installer for your system from the [latest release](https://github.com/shyrel666/claude-pulse/releases/latest):
+Grab the installer for your system from the [latest release](https://github.com/shyrel666/cc-deskmeter/releases/latest):
 
 | OS | File |
 |---|---|
@@ -40,16 +40,19 @@ Grab the installer for your system from the [latest release](https://github.com/
 > [!NOTE]
 > The installers are not code-signed yet.
 > **Windows:** if SmartScreen appears, click **More info → Run anyway**.
-> **macOS:** if the app "is damaged", move it to Applications and run `xattr -cr /Applications/claude-pulse.app` once.
+> **macOS:** if the app "is damaged", move it to Applications and run `xattr -cr /Applications/cc-deskmeter.app` once.
 
-## Why Claude Pulse
+## Why CC-Deskmeter
 
-Newer Claude Code Desktop builds no longer show token usage, so you code without knowing how much of your 5-hour window is left, how fast you're burning it, or whether caching is working. Claude Pulse puts those answers in a small window you can keep in the corner of your screen.
+Newer Claude Code Desktop builds no longer show token usage, so you code without knowing how much of your 5-hour window is left, how fast you're burning it, when the weekly limit will run out, or whether caching is working. CC-Deskmeter puts those answers in a small window you can keep in the corner of your screen. The Claude Code CLI writes the same transcripts, so terminal sessions count too.
 
+- **100% offline.** No account, API key or network access: it only reads files Claude Code Desktop already keeps on your computer, plus a small [history archive](#history-archive) of its own.
 - **The token chart, back.** Stacked input, output, cache write and cache read for the current block, 14 days or months, plus a per-project leaderboard.
-- **5-hour window at a glance.** Countdown to reset, burn rate in tokens/min and $/hour, and a projected block total at your current pace.
+- **5-hour window at a glance.** Countdown to reset, burn rate in tokens/min and $/hour, and a projected block total learned from how your past windows went on.
+- **Weekly limit, ahead of time.** When your current pace hits the weekly limit and how that compares with the reset, a daily budget until then, and which projects and models used it. Needs Claude Desktop on the same computer.
 - **Cache reads, one click away.** Strip the huge cache-read volume out of the chart so the rest of your usage stays readable.
 - **Mini HUD.** A 320×140 frameless, always-on-top widget that updates with every response.
+- **Numbers in the tray.** Hover the tray icon on Windows for the reset countdown, predicted quota, burn rate and today's total, or right-click it for a compact panel in the app's theme. On macOS the menu bar shows the quota and countdown beside the icon; pick either one, or the icon alone, from its menu. Closing the window can minimize it to the tray, where tracking carries on.
 - **Three themes.** *Claude Warm*, *Swiss Dial* and *Glass Bento*.
 - **Share card.** Export a 2400×1350 stats card with your totals, cache hit ratio and API-equivalent value. It contains totals only.
 
@@ -96,6 +99,7 @@ Drawn locally and copied or saved as PNG, in English or Chinese. It never shows 
 | Key | Action |
 |---|---|
 | <kbd>M</kbd> | Toggle the Mini HUD |
+| <kbd>A</kbd> | Open the archive & lifetime view |
 | <kbd>R</kbd> | Rescan transcripts |
 | <kbd>T</kbd> | Cycle themes |
 | <kbd>L</kbd> | Switch between English and 中文 |
@@ -104,7 +108,7 @@ Drawn locally and copied or saved as PNG, in English or Chinese. It never shows 
 
 ## Star history
 
-[![Star History Chart](https://api.star-history.com/svg?repos=shyrel666/claude-pulse&type=Date)](https://star-history.com/#shyrel666/claude-pulse&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=shyrel666/cc-deskmeter&type=Date)](https://star-history.com/#shyrel666/cc-deskmeter&Date)
 
 ## License
 

@@ -59,6 +59,15 @@ export function formatCost(value: number, unpricedCount: number, unknownLabel: s
   return value > 0 ? `${formatUsd(value, options)}+` : unknownLabel;
 }
 
+/** 512 B · 12.4 KB · 3.1 MB */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(kb < 10 ? 1 : 0)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
+}
+
 export function formatPercent(ratio: number, digits = 1): string {
   if (!Number.isFinite(ratio)) return "—";
   return `${(ratio * 100).toFixed(digits)}%`;
@@ -111,10 +120,9 @@ export function toLocalDateKey(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
-/** Shows `~/.claude/projects` for the default location, the full path otherwise. */
-export function displayDataDir(dir: string | null): string {
-  if (!dir) return "~/.claude/projects";
-  return /[\\/]\.claude[\\/]projects[\\/]?$/.test(dir) ? "~/.claude/projects" : dir;
+/** The backend already writes the home folder as `~`. */
+export function displayDataDirs(dirs: string[]): string {
+  return dirs.length ? dirs.join(", ") : "~/.claude/projects";
 }
 
 const familyNames: Record<string, string> = {

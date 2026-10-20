@@ -1,9 +1,13 @@
 import { useId, type ReactNode } from "react";
 
+import { chargeTransition, sweepDelay } from "../../lib/motion";
 import { useTheme } from "../../theme/ThemeProvider";
+import { useCharge } from "../IntroStage";
 
 /** Smallest gap, in px of arc, left open on a round-capped ring that is not full. */
 const MIN_GAP = 3;
+/** How the arc (and the Swiss index) follows a new value. */
+const UPDATE_EASE = "800ms cubic-bezier(0.22, 1, 0.36, 1)";
 
 interface RingProps {
   /** 0..1 */
@@ -16,12 +20,14 @@ interface RingProps {
 /**
  * Radial gauge: a soft sage arc (Claude Warm), a camera-dial bezel with an ink
  * arc and an orange index (Swiss Industrial) or a glowing violet→blue gradient
- * arc (Glass Bento).
+ * arc (Glass Bento). It charges up from empty when its view opens.
  */
 export function Ring({ value, label, size = 112, children }: RingProps) {
   const { theme } = useTheme();
   const gradientId = useId();
   const clamped = Math.min(1, Math.max(0, Number.isFinite(value) ? value : 0));
+  const { value: drawn, charging } = useCharge(clamped);
+  const arcMotion = (property: string) => (charging ? chargeTransition(property) : `${property} ${UPDATE_EASE}`);
   const center = size / 2;
 
   let ring: ReactNode;
@@ -35,8 +41,9 @@ export function Ring({ value, label, size = 112, children }: RingProps) {
       const angle = fraction * Math.PI * 2 - Math.PI / 2;
       return { x: center + Math.cos(angle) * r, y: center + Math.sin(angle) * r };
     };
-    const needleIn = at(clamped, radius - stroke / 2 - 3);
-    const needleOut = at(clamped, radius + stroke / 2 + 3);
+    // Drawn at 12 o'clock and turned, so it sweeps round with the arc.
+    const needleIn = at(0, radius - stroke / 2 - 3);
+    const needleOut = at(0, radius + stroke / 2 + 3);
     ring = (
       <>
         {Array.from({ length: ticks }, (_, i) => {
@@ -50,7 +57,10 @@ export function Ring({ value, label, size = 112, children }: RingProps) {
               y1={from.y}
               x2={to.x}
               y2={to.y}
-              stroke={i / ticks <= clamped ? "#111110" : "#B5B5AC"}
+              style={{
+                stroke: i / ticks <= drawn ? "#111110" : "#B5B5AC",
+                transition: charging ? chargeTransition("stroke", sweepDelay(i / ticks, clamped), 120) : undefined,
+              }}
               strokeOpacity={major ? 1 : 0.75}
               strokeWidth={major ? 1.4 : 1}
             />
@@ -64,9 +74,9 @@ export function Ring({ value, label, size = 112, children }: RingProps) {
           fill="none"
           stroke="#111110"
           strokeWidth={stroke}
-          strokeDasharray={`${circumference * clamped} ${circumference}`}
+          strokeDasharray={`${circumference * drawn} ${circumference}`}
           transform={`rotate(-90 ${center} ${center})`}
-          style={{ transition: "stroke-dasharray 800ms cubic-bezier(0.22, 1, 0.36, 1)" }}
+          style={{ transition: arcMotion("stroke-dasharray") }}
         />
         <line
           x1={needleIn.x}
@@ -76,7 +86,12 @@ export function Ring({ value, label, size = 112, children }: RingProps) {
           stroke="#FF4F00"
           strokeWidth={2.5}
           strokeLinecap="round"
-          style={{ filter: "drop-shadow(0 1px 2px rgba(255, 79, 0, 0.45))" }}
+          style={{
+            transform: `rotate(${drawn * 360}deg)`,
+            transformOrigin: `${center}px ${center}px`,
+            transition: arcMotion("transform"),
+            filter: "drop-shadow(0 1px 2px rgba(255, 79, 0, 0.45))",
+          }}
         />
       </>
     );
@@ -88,8 +103,8 @@ export function Ring({ value, label, size = 112, children }: RingProps) {
     // Round caps overhang each end of the dash by half the stroke, which closed the gap on a
     // nearly full ring (98.6% drew as 100%). Shorten the dash by one stroke and start it half
     // a stroke in, so the visible arc spans exactly the value, leaving at least MIN_GAP open.
-    const full = clamped >= 1;
-    const arc = full ? circumference : Math.min(circumference * clamped, circumference - MIN_GAP);
+    const full = drawn >= 1;
+    const arc = full ? circumference : Math.min(circumference * drawn, circumference - MIN_GAP);
     const dash = full ? circumference : Math.max(0, arc - stroke);
     ring = (
       <>
@@ -114,7 +129,7 @@ export function Ring({ value, label, size = 112, children }: RingProps) {
           strokeDashoffset={full ? 0 : -stroke / 2}
           transform={`rotate(-90 ${center} ${center})`}
           style={{
-            transition: "stroke-dasharray 800ms cubic-bezier(0.22, 1, 0.36, 1)",
+            transition: arcMotion("stroke-dasharray"),
             filter: glass ? "drop-shadow(0 0 6px rgba(139, 92, 246, 0.55))" : undefined,
           }}
         />

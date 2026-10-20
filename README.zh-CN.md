@@ -1,16 +1,16 @@
 <div align="center">
 
-<img src="docs/brand/app-icon.svg" width="112" alt="Claude Pulse logo" />
+<img src="docs/brand/app-icon.svg" width="112" alt="CC-Deskmeter logo" />
 
-# Claude Pulse
+# CC-Deskmeter
 
-**Claude Code 实时 Token 与费用仪表盘：100% 本地离线，隐私优先。**
+**Claude Code Desktop 实时 Token、费用与周限额仪表盘：100% 本地离线。**
 
-把新版 Claude Code Desktop 移除的 Token 图表找回来：<br />
-5 小时窗口倒计时、消耗速率、缓存命中率、折算 API 价值，直接从你硬盘上已有的对话日志实时计算。
+把新版 Claude Code Desktop 移除的 Token 图表找回来，还能提前看到周限额什么时候用完：<br />
+5 小时窗口倒计时、消耗速率、缓存命中率、折算 API 价值和周限额预测，全部从你电脑上已有的文件实时计算。
 
 <p>
-  <a href="https://github.com/shyrel666/claude-pulse/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/shyrel666/claude-pulse?label=release" /></a>
+  <a href="https://github.com/shyrel666/cc-deskmeter/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/shyrel666/cc-deskmeter?label=release" /></a>
   <img alt="Tauri v2" src="https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white" />
   <img alt="Rust" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white" />
   <img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black" />
@@ -21,7 +21,7 @@
 
 [English](README.md) · **简体中文**
 
-<img src="docs/screenshots/dashboard-claude-warm.png" alt="Claude Pulse 仪表盘（Claude Warm 主题）" width="100%" />
+<img src="docs/screenshots/dashboard-claude-warm.png" alt="CC-Deskmeter 仪表盘（Claude Warm 主题）" width="100%" />
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## 下载
 
-到[最新发布页](https://github.com/shyrel666/claude-pulse/releases/latest)下载对应系统的安装包：
+到[最新发布页](https://github.com/shyrel666/cc-deskmeter/releases/latest)下载对应系统的安装包：
 
 | 系统 | 文件 |
 |---|---|
@@ -40,16 +40,19 @@
 > [!NOTE]
 > 安装包暂未签名。
 > **Windows：** 如果出现 SmartScreen 提示，点「更多信息 → 仍要运行」。
-> **macOS：** 如果提示应用「已损坏」，先拖进「应用程序」，再执行一次 `xattr -cr /Applications/claude-pulse.app`。
+> **macOS：** 如果提示应用「已损坏」，先拖进「应用程序」，再执行一次 `xattr -cr /Applications/cc-deskmeter.app`。
 
 ## 为什么需要它
 
-新版 Claude Code Desktop 不再显示 Token 用量：5 小时窗口还剩多少、现在消耗得有多快、缓存有没有生效，写代码时都只能靠猜。Claude Pulse 把这些答案放进一个可以停在屏幕角落的小窗口里。
+新版 Claude Code Desktop 不再显示 Token 用量：5 小时窗口还剩多少、现在消耗得有多快、周限额什么时候用完、缓存有没有生效，写代码时都只能靠猜。CC-Deskmeter 把这些答案放进一个可以停在屏幕角落的小窗口里。Claude Code CLI 写的是同一份对话日志，所以终端里的会话也会算进来。
 
+- **100% 离线。** 不用账号、不用 API Key、不联网，只读取 Claude Code Desktop 本来就存在你电脑上的文件，外加一份自己的小型[历史归档](#历史归档)。
 - **找回 Token 图表。** 输入、输出、缓存写入、缓存读取堆叠展示，可切换当前窗口、14 天或按月视图，并附项目用量排行榜。
-- **5 小时窗口一目了然。** 重置倒计时、tokens/min 与 $/h 消耗速率，以及按当前速度推算的窗口总量。
+- **5 小时窗口一目了然。** 重置倒计时、tokens/min 与 $/h 消耗速率，以及参照你以往窗口的用量走势推算的窗口总量。
+- **提前看清周限额。** 按当前速度什么时候用到 100%、会不会早于重置，到重置前每天还能用多少，以及额度被哪些项目、模型用掉。需要同一台电脑上装有 Claude Desktop。
 - **一键剥离缓存读取。** 把体量巨大的 cache read 从图表中移出，其余用量依然清晰可读。
 - **迷你悬浮窗（Mini HUD）。** 320×140、无边框、始终置顶，随每次响应实时刷新。
+- **托盘直接看数字。** Windows 上鼠标悬停托盘图标即可看到重置倒计时、预计额度、燃烧速率和今日用量，右键则弹出跟随应用主题的紧凑面板；macOS 菜单栏在图标旁直接显示额度和倒计时，可在菜单里改成只显示其中一项或仅图标。关闭窗口时可选择最小化到托盘，统计在后台继续。
 - **三套主题。** *Claude Warm*、*Swiss Dial*、*Glass Bento*。
 - **极客统计分享卡。** 导出 2400×1350 的统计卡片，展示总 Token、缓存命中率和折算 API 价值，只包含汇总数字。
 
@@ -96,6 +99,7 @@
 | 按键 | 作用 |
 |---|---|
 | <kbd>M</kbd> | 切换迷你悬浮窗 |
+| <kbd>A</kbd> | 打开归档与历史统计 |
 | <kbd>R</kbd> | 重新扫描日志 |
 | <kbd>T</kbd> | 循环切换主题 |
 | <kbd>L</kbd> | 切换界面语言（中文 / English） |
@@ -104,7 +108,7 @@
 
 ## Star 趋势
 
-[![Star History Chart](https://api.star-history.com/svg?repos=shyrel666/claude-pulse&type=Date)](https://star-history.com/#shyrel666/claude-pulse&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=shyrel666/cc-deskmeter&type=Date)](https://star-history.com/#shyrel666/cc-deskmeter&Date)
 
 ## 许可证
 
