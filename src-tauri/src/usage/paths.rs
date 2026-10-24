@@ -327,7 +327,7 @@ mod tests {
         let home = TempHome::new("late-projects");
         let roots = resolve(Some("~/new/projects"), None, &home);
         let projects = home.0.join("new/projects");
-        assert_eq!(roots.dirs, [projects.clone()]);
+        assert_eq!(roots.dirs, [projects]);
         assert!(roots.problem().is_some());
 
         let project = home.mkdir("new/projects/p");

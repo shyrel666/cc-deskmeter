@@ -21,7 +21,8 @@ export function Button({ variant = "secondary", icon: Icon, className, children,
               "warm:rounded-full warm:bg-accent warm:text-[#1a1a18] warm:hover:brightness-110",
               // Swiss Industrial: the one black key on the panel, with an orange legend
               "swiss:border swiss:border-ink swiss:bg-ink swiss:text-surface swiss:shadow-[0_1px_0_#000,0_2px_5px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.14)] swiss:hover:bg-[#262624] swiss:active:shadow-[inset_0_1px_2px_rgba(0,0,0,0.6)]",
-              "glass:rounded-full glass:bg-gradient-to-r glass:from-[#8B5CF6] glass:to-[#6366F1] glass:text-white glass:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.25),0_8px_20px_-8px_rgba(139,92,246,0.8)] glass:hover:brightness-110",
+              // Glass Bento: the tool's gradient, as on a switch that is on (Claude's violet, Codex's cyan)
+              "glass:rounded-full glass:[background:var(--pulse-switch-on)] glass:text-white glass:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.25),0_8px_20px_-8px_color-mix(in_srgb,var(--pulse-accent)_80%,transparent)] glass:hover:brightness-110",
             ]
           : [
               "text-ink-2 hover:text-ink",

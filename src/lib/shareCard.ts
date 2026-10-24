@@ -1,6 +1,8 @@
 // Renders the shareable stats card with the Canvas 2D API: no DOM snapshot
 // library, identical output in every webview, and nothing leaves the machine.
-// The card shows totals only — never project names or paths.
+// The card shows totals only — never project names or paths. Its frame,
+// tiles, heatmap and facts are exported for the ChatGPT card
+// (src/codex/shareCard.ts).
 
 import { MESSAGES, type Lang } from "../i18n/messages";
 import type { ThemeDefinition, ThemeId } from "../theme/themes";
@@ -8,6 +10,7 @@ import { SERIES_KEYS, type SeriesKey } from "../theme/themes";
 import type { UsageData, UsageStats } from "../types";
 import { MARK_BEAT, MARK_PROMPT, MARK_STROKE } from "./brand";
 import { formatCost, formatInteger, formatPercent, formatTokens, formatUsd, parseLocalDate, prettyModel, toLocalDateKey } from "./format";
+import { CLAUDE_MARK, CLAUDE_MARK_COLOR, type ToolMark } from "./marks";
 
 export const CARD_WIDTH = 1200;
 export const CARD_HEIGHT = 675;
@@ -15,9 +18,16 @@ export const CARD_HEIGHT = 675;
 const SCALE = 2;
 const HEATMAP_WEEKS = 30;
 
+/** The window frame, and the left and right columns inside it. */
+const FRAME = { x: 32, y: 32, w: CARD_WIDTH - 64, h: CARD_HEIGHT - 64 };
+const X0 = 72;
+const LEFT_W = 560;
+const RX = 668;
+const RW = CARD_WIDTH - 72 - RX;
+
 /* Copy ------------------------------------------------------------------- */
 
-interface CardCopy {
+export interface CardCopy {
   locale: string;
   totalTokens: string;
   tokens: string;
@@ -43,7 +53,7 @@ interface CardCopy {
   footerRight: string;
 }
 
-const COPY: Record<Lang, CardCopy> = {
+export const CARD_COPY: Record<Lang, CardCopy> = {
   en: {
     locale: "en-US",
     totalTokens: "TOTAL TOKENS",
@@ -102,7 +112,7 @@ const MONO = '"JetBrains Mono Variable", "Cascadia Code", Consolas, "PingFang SC
 const SANS = '"Inter Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif';
 const SERIF = '"Newsreader Variable", Georgia, "Songti SC", "SimSun", serif';
 
-interface CardPalette {
+export interface CardPalette {
   bg: string;
   frame: string;
   frameLine: string;
@@ -127,7 +137,7 @@ interface CardPalette {
   industrial: boolean;
 }
 
-const PALETTES: Record<ThemeId, CardPalette> = {
+export const CARD_PALETTES: Record<ThemeId, CardPalette> = {
   "claude-warm": {
     bg: "#141413",
     frame: "#1b1b19",
@@ -202,29 +212,28 @@ const PALETTES: Record<ThemeId, CardPalette> = {
 
 /* Stats ------------------------------------------------------------------ */
 
-export interface ShareStats {
-  total: UsageStats;
+/** What the heatmap and the day facts show. */
+export interface Activity {
   firstDay: string | null;
   activeDays: number;
   peak: { date: string; tokens: number } | null;
   streak: number;
-  topModel: { name: string; share: number } | null;
   /** Total tokens per local date. */
   byDate: Map<string, number>;
-  dailyCost: number[];
 }
 
-export function shareStats(data: UsageData, todayKey: string): ShareStats {
+/** From each day's `[date, total tokens]`, oldest first. */
+export function activity(days: Iterable<readonly [string, number]>, todayKey: string): Activity {
   const byDate = new Map<string, number>();
   let activeDays = 0;
   let firstDay: string | null = null;
-  let peak: ShareStats["peak"] = null;
-  for (const day of data.daily) {
-    byDate.set(day.date, day.totalTokens);
-    if (day.totalTokens <= 0) continue;
+  let peak: Activity["peak"] = null;
+  for (const [date, tokens] of days) {
+    byDate.set(date, tokens);
+    if (tokens <= 0) continue;
     activeDays += 1;
-    firstDay ??= day.date;
-    if (!peak || day.totalTokens > peak.tokens) peak = { date: day.date, tokens: day.totalTokens };
+    firstDay ??= date;
+    if (!peak || tokens > peak.tokens) peak = { date, tokens };
   }
 
   // Consecutive active days ending today (or yesterday, if today is still quiet).
@@ -235,19 +244,24 @@ export function shareStats(data: UsageData, todayKey: string): ShareStats {
     streak += 1;
     cursor.setDate(cursor.getDate() - 1);
   }
+  return { firstDay, activeDays, peak, streak, byDate };
+}
 
+export interface ShareStats extends Activity {
+  total: UsageStats;
+  topModel: { name: string; share: number } | null;
+  dailyCost: number[];
+}
+
+export function shareStats(data: UsageData, todayKey: string): ShareStats {
   const models = data.models.filter((m) => m.model !== "<synthetic>");
   const calls = models.reduce((sum, m) => sum + m.messageCount, 0);
   const top = [...models].sort((a, b) => b.messageCount - a.messageCount)[0];
 
   return {
+    ...activity(data.daily.map((day) => [day.date, day.totalTokens] as const), todayKey),
     total: data.total,
-    firstDay,
-    activeDays,
-    peak,
-    streak,
     topModel: top && calls > 0 ? { name: prettyModel(top.model), share: top.messageCount / calls } : null,
-    byDate,
     dailyCost: data.daily.slice(-30).map((d) => d.costUsd),
   };
 }
@@ -262,6 +276,61 @@ export interface ShareCardOptions {
 }
 
 export async function renderShareCard({ data, theme, lang, todayKey }: ShareCardOptions): Promise<HTMLCanvasElement> {
+  const { canvas, ctx } = await startCard();
+  const p = CARD_PALETTES[theme.id];
+  const t = CARD_COPY[lang];
+  const stats = shareStats(data, todayKey);
+  // The chart's cache-read hue is nearly the track colour; use its lighter step.
+  const series = { ...theme.chart.series, cacheRead: theme.chart.cacheReadStroke };
+  const dateFmt = new Intl.DateTimeFormat(t.locale, { year: "numeric", month: "short", day: "numeric" });
+
+  drawChrome(ctx, p, dateFmt.format(parseLocalDate(todayKey)), "cc-deskmeter --share claude");
+  const tool = { name: "CLAUDE", mark: CLAUDE_MARK, color: p.industrial ? p.ink : CLAUDE_MARK_COLOR };
+  drawHero(ctx, p, tool, t.totalTokens, formatTokens(stats.total.totalTokens), t.tokens);
+
+  drawHeroNote(ctx, p, [
+    `${formatInteger(stats.total.totalTokens)} ${t.tokens}`,
+    `${formatInteger(stats.total.messageCount)} ${t.responses}`,
+    stats.firstDay ? t.since(dateFmt.format(parseLocalDate(stats.firstDay))) : null,
+  ]);
+
+  // Composition bar + legend.
+  const values: Record<SeriesKey, number> = {
+    output: stats.total.outputTokens,
+    input: stats.total.inputTokens,
+    cacheWrite: stats.total.cacheCreationTokens,
+    cacheRead: stats.total.cacheReadTokens,
+  };
+  drawComposition(ctx, p, SERIES_KEYS.map((key) => [series[key], t.series[key], values[key]]));
+  drawCacheTile(ctx, p, t, stats.total.cacheHitRatio, stats.total.cacheReadTokens);
+
+  drawValueTile(ctx, p, t, {
+    costUsd: stats.total.costUsd,
+    unpriced: stats.total.unpricedMessageCount,
+    unpricedLabel: MESSAGES[lang].common.unpriced,
+    activeDays: stats.activeDays,
+    dailyCost: stats.dailyCost,
+  });
+
+  drawActivity(ctx, p, t, stats.byDate, todayKey, theme.mark);
+  drawFacts(ctx, p, [
+    ...dayFacts(stats, t),
+    [t.topModel, stats.topModel?.name ?? "—", stats.topModel ? t.ofCalls(formatPercent(stats.topModel.share, 0)) : null],
+  ]);
+  drawFooter(ctx, p, t, data.readErrors.length > 0);
+  return canvas;
+}
+
+export function canvasToPng(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) =>
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Could not encode the PNG"))), "image/png"),
+  );
+}
+
+/* Card parts, the same on every card ------------------------------------- */
+
+/** A blank card at export resolution, drawn on in card pixels. */
+export async function startCard(): Promise<{ canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D }> {
   await loadFonts();
   const canvas = document.createElement("canvas");
   canvas.width = CARD_WIDTH * SCALE;
@@ -269,19 +338,15 @@ export async function renderShareCard({ data, theme, lang, todayKey }: ShareCard
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas 2D is not available in this webview");
   ctx.scale(SCALE, SCALE);
+  return { canvas, ctx };
+}
 
-  const p = PALETTES[theme.id];
-  const t = COPY[lang];
-  const stats = shareStats(data, todayKey);
-  // The chart's cache-read hue is nearly the track colour; use its lighter step.
-  const series = { ...theme.chart.series, cacheRead: theme.chart.cacheReadStroke };
-  const dateFmt = new Intl.DateTimeFormat(t.locale, { year: "numeric", month: "short", day: "numeric" });
-  const shortDate = new Intl.DateTimeFormat(t.locale, { month: "short", day: "numeric" });
-
+/** Background, window frame, title bar with `date`, and the prompt line running `command`. */
+export function drawChrome(ctx: CanvasRenderingContext2D, p: CardPalette, date: string, command: string) {
   drawBackground(ctx, p);
 
   // Window frame + title bar.
-  const F = { x: 32, y: 32, w: CARD_WIDTH - 64, h: CARD_HEIGHT - 64 };
+  const F = FRAME;
   roundRect(ctx, F.x, F.y, F.w, F.h, p.radius);
   ctx.save();
   if (p.industrial) {
@@ -305,53 +370,53 @@ export async function renderShareCard({ data, theme, lang, todayKey }: ShareCard
     ctx.fill();
   });
   text(ctx, "cc-deskmeter", CARD_WIDTH / 2, 57, `500 14px ${MONO}`, p.ink3, "center", "middle");
-  text(ctx, dateFmt.format(parseLocalDate(todayKey)), F.x + F.w - 28, 57, `500 13px ${MONO}`, p.ink3, "right", "middle");
+  text(ctx, date, F.x + F.w - 28, 57, `500 13px ${MONO}`, p.ink3, "right", "middle");
   hline(ctx, F.x, F.x + F.w, 82, p.frameLine);
-
-  const X0 = 72;
-  const LEFT_W = 560;
-  const RX = 668;
-  const RW = CARD_WIDTH - 72 - RX;
 
   // Prompt line with a block cursor.
   ctx.font = `500 17px ${MONO}`;
   text(ctx, "$", X0, 116, ctx.font, p.accent, "left", "middle");
-  const cmd = " cc-deskmeter --share";
+  const cmd = ` ${command}`;
   text(ctx, cmd, X0 + ctx.measureText("$").width, 116, ctx.font, p.ink2, "left", "middle");
   ctx.fillStyle = p.accent;
   ctx.globalAlpha = 0.85;
   ctx.fillRect(X0 + ctx.measureText(`$${cmd}`).width + 6, 106, 10, 20);
   ctx.globalAlpha = 1;
+}
 
-  // Hero: total tokens.
-  label(ctx, t.totalTokens, X0, 166, p);
+/** The tool a card is for: named before the hero's label, after its mark in the colour the Claude · Codex switch lights it. */
+export interface CardTool {
+  name: string;
+  mark: ToolMark;
+  color: string;
+}
+
+/** The headline figure under its tool and label, with its unit after it. */
+export function drawHero(ctx: CanvasRenderingContext2D, p: CardPalette, tool: CardTool, name: string, value: string, unit: string) {
+  // The mark centred on the label's capitals, and the tool's name a step brighter than the rest.
+  drawToolMark(ctx, tool.mark, X0, 155, 13, tool.color);
+  const toolW = label(ctx, tool.name, X0 + 20, 166, p, p.ink2);
+  label(ctx, ` · ${name}`, X0 + 20 + toolW, 166, p);
   const unitFont = `500 26px ${p.body}`;
   ctx.font = unitFont;
-  const unitW = ctx.measureText(t.tokens).width;
-  const heroFont = fitFont(ctx, formatTokens(stats.total.totalTokens), `700 {size}px ${p.num}`, 118, LEFT_W - unitW - 18);
+  const unitW = ctx.measureText(unit).width;
+  const heroFont = fitFont(ctx, value, `700 {size}px ${p.num}`, 118, LEFT_W - unitW - 18);
   ctx.font = heroFont;
-  const heroW = ctx.measureText(formatTokens(stats.total.totalTokens)).width;
-  text(ctx, formatTokens(stats.total.totalTokens), X0 - 3, 268, heroFont, p.ink);
-  text(ctx, t.tokens, X0 + heroW + 14, 268, unitFont, p.ink2);
+  const heroW = ctx.measureText(value).width;
+  text(ctx, value, X0 - 3, 268, heroFont, p.ink);
+  text(ctx, unit, X0 + heroW + 14, 268, unitFont, p.ink2);
+}
 
-  const exact = [
-    `${formatInteger(stats.total.totalTokens)} ${t.tokens}`,
-    `${formatInteger(stats.total.messageCount)} ${t.responses}`,
-    stats.firstDay ? t.since(dateFmt.format(parseLocalDate(stats.firstDay))) : null,
-  ]
-    .filter(Boolean)
-    .join("  ·  ");
-  text(ctx, exact, X0, 304, fitFont(ctx, exact, `500 {size}px ${MONO}`, 14, LEFT_W), p.ink3);
+/** The line under the hero: its parts that are there, apart. */
+export function drawHeroNote(ctx: CanvasRenderingContext2D, p: CardPalette, parts: (string | null)[]) {
+  const note = parts.filter(Boolean).join("  ·  ");
+  text(ctx, note, X0, 304, fitFont(ctx, note, `500 {size}px ${MONO}`, 14, LEFT_W), p.ink3);
+}
 
-  // Composition bar + legend.
-  const totalTokens = Math.max(1, stats.total.totalTokens);
-  const values: Record<SeriesKey, number> = {
-    output: stats.total.outputTokens,
-    input: stats.total.inputTokens,
-    cacheWrite: stats.total.cacheCreationTokens,
-    cacheRead: stats.total.cacheReadTokens,
-  };
-  const visible = SERIES_KEYS.filter((key) => values[key] > 0);
+/** The composition bar under the hero and its legend: `[colour, name, tokens]` per part, in order. */
+export function drawComposition(ctx: CanvasRenderingContext2D, p: CardPalette, parts: [string, string, number][]) {
+  const total = Math.max(1, parts.reduce((sum, [, , value]) => sum + value, 0));
+  const visible = parts.filter(([, , value]) => value > 0);
   const gap = 3;
   const minW = 4;
   const free = LEFT_W - gap * Math.max(0, visible.length - 1) - minW * visible.length;
@@ -361,79 +426,108 @@ export async function renderShareCard({ data, theme, lang, todayKey }: ShareCard
   ctx.clip();
   ctx.fillStyle = p.track;
   ctx.fillRect(X0, 332, LEFT_W, 10);
-  for (const key of visible) {
-    const w = minW + (values[key] / totalTokens) * free;
-    ctx.fillStyle = series[key];
+  for (const [color, , value] of visible) {
+    const w = minW + (value / total) * free;
+    ctx.fillStyle = color;
     ctx.fillRect(bx, 332, w, 10);
     bx += w + gap;
   }
   ctx.restore();
-  drawLegend(ctx, X0, 370, LEFT_W, SERIES_KEYS.map((key) => [series[key], t.series[key], formatTokens(values[key])]), p);
+  drawLegend(ctx, X0, 370, LEFT_W, parts.map(([color, name, value]) => [color, name, formatTokens(value)]), p);
+}
 
-  // Tile 1: cache hit ratio, with a ring.
+/** The first tile: the cache hit ratio, with a ring, and the tokens read from cache. */
+export function drawCacheTile(ctx: CanvasRenderingContext2D, p: CardPalette, t: CardCopy, ratio: number, cached: number) {
   tile(ctx, RX, 104, RW, 128, p);
   label(ctx, t.cacheHit, RX + 24, 138, p);
-  text(ctx, formatPercent(stats.total.cacheHitRatio), RX + 22, 192, `700 46px ${p.num}`, p.ink);
-  text(ctx, t.cacheSub(formatTokens(stats.total.cacheReadTokens)), RX + 24, 216, `500 13px ${p.body}`, p.ink3);
-  drawRing(ctx, RX + RW - 70, 168, 38, stats.total.cacheHitRatio, p);
+  text(ctx, formatPercent(ratio), RX + 22, 192, `700 46px ${p.num}`, p.ink);
+  text(ctx, t.cacheSub(formatTokens(cached)), RX + 24, 216, `500 13px ${p.body}`, p.ink3);
+  drawRing(ctx, RX + RW - 70, 168, 38, ratio, p);
+}
 
-  // Tile 2: API-equivalent value, with a 30-day cost sparkline.
+export interface CardValue {
+  costUsd: number;
+  /** Responses left out of `costUsd`: their model has no price. */
+  unpriced: number;
+  unpricedLabel: string;
+  activeDays: number;
+  /** The last 30 days' cost, oldest first. */
+  dailyCost: number[];
+}
+
+/** The second tile: what the tokens would cost at API list prices, with a 30-day cost sparkline. */
+export function drawValueTile(ctx: CanvasRenderingContext2D, p: CardPalette, t: CardCopy, value: CardValue) {
   tile(ctx, RX, 248, RW, 128, p);
   label(ctx, t.apiValue, RX + 24, 282, p);
-  const valueText = formatCost(stats.total.costUsd, stats.total.unpricedMessageCount, MESSAGES[lang].common.unpriced);
+  const valueText = formatCost(value.costUsd, value.unpriced, value.unpricedLabel);
   const valueFont = fitFont(ctx, valueText, `700 {size}px ${p.num}`, 46, RW - 210);
   ctx.font = valueFont;
   const valueGradient = ctx.createLinearGradient(RX + 22, 0, RX + 22 + ctx.measureText(valueText).width, 0);
   valueGradient.addColorStop(0, p.accent);
   valueGradient.addColorStop(1, p.accentEnd);
   text(ctx, valueText, RX + 22, 336, valueFont, valueGradient);
-  const perDay = stats.activeDays > 0 ? formatUsd(stats.total.costUsd / stats.activeDays) : "—";
-  const costNote = stats.total.unpricedMessageCount > 0 ? t.unpriced(stats.total.unpricedMessageCount) : t.apiSub(perDay);
+  const perDay = value.activeDays > 0 ? formatUsd(value.costUsd / value.activeDays) : "—";
+  const costNote = value.unpriced > 0 ? t.unpriced(value.unpriced) : t.apiSub(perDay);
   text(ctx, costNote, RX + 24, 360, fitFont(ctx, costNote, `500 {size}px ${p.body}`, 13, RW - 48), p.ink3);
-  drawSparkline(ctx, RX + RW - 170, 276, 146, 46, stats.dailyCost, p);
+  drawSparkline(ctx, RX + RW - 170, 276, 146, 46, value.dailyCost, p);
+}
 
-  // Activity heatmap.
-  const HY = 448;
+/** The activity heatmap under its label and legend, in `color`. */
+export function drawActivity(
+  ctx: CanvasRenderingContext2D,
+  p: CardPalette,
+  t: CardCopy,
+  byDate: Map<string, number>,
+  todayKey: string,
+  color: string,
+) {
   label(ctx, t.activity(HEATMAP_WEEKS), X0, 432, p);
   const heatW = HEATMAP_WEEKS * 18 - 4;
-  drawHeatLegend(ctx, X0 + heatW, 432, theme.mark, p, t);
-  drawHeatmap(ctx, X0, HY, stats.byDate, todayKey, theme.mark, p);
+  drawHeatLegend(ctx, X0 + heatW, 432, color, p, t);
+  drawHeatmap(ctx, X0, 448, byDate, todayKey, color, p);
+}
 
-  // Fun facts, 2×2.
-  const facts: [string, string, string | null][] = [
+/** A fact under the heatmap's tiles: its name, value and a note after the value. */
+export type Fact = [name: string, value: string, sub: string | null];
+
+/** Active days, the peak day and the streak: the first three facts of a card. */
+export function dayFacts(stats: Activity, t: CardCopy): Fact[] {
+  const shortDate = new Intl.DateTimeFormat(t.locale, { month: "short", day: "numeric" });
+  return [
     [t.activeDays, formatInteger(stats.activeDays), null],
     [t.peakDay, stats.peak ? formatTokens(stats.peak.tokens) : "—", stats.peak ? shortDate.format(parseLocalDate(stats.peak.date)) : null],
     [t.streak, t.days(stats.streak), null],
-    [t.topModel, stats.topModel?.name ?? "—", stats.topModel ? t.ofCalls(formatPercent(stats.topModel.share, 0)) : null],
   ];
+}
+
+/** Four facts, 2×2. A value too wide for its column with its note shrinks. */
+export function drawFacts(ctx: CanvasRenderingContext2D, p: CardPalette, facts: Fact[]) {
+  const subFont = `500 13px ${p.body}`;
   facts.forEach(([name, value, sub], i) => {
     const fx = RX + (i % 2) * (RW / 2);
     const fy = i < 2 ? 444 : 524;
     label(ctx, name, fx, fy, p);
-    const factFont = `700 28px ${p.num}`;
+    ctx.font = subFont;
+    const subW = sub ? ctx.measureText(sub).width + 10 : 0;
+    // The left column keeps clear of the right one.
+    const room = RW / 2 - (i % 2 ? 0 : 16) - subW;
+    const factFont = fitFont(ctx, value, `700 {size}px ${p.num}`, 28, room);
     text(ctx, value, fx, fy + 38, factFont, p.ink);
     if (sub) {
       ctx.font = factFont;
-      text(ctx, sub, fx + ctx.measureText(value).width + 10, fy + 38, `500 13px ${p.body}`, p.ink3);
+      text(ctx, sub, fx + ctx.measureText(value).width + 10, fy + 38, subFont, p.ink3);
     }
   });
+}
 
-  // Footer.
-  hline(ctx, F.x, F.x + F.w, 594, p.frameLine);
+export function drawFooter(ctx: CanvasRenderingContext2D, p: CardPalette, t: CardCopy, incomplete: boolean) {
+  hline(ctx, FRAME.x, FRAME.x + FRAME.w, 594, p.frameLine);
   drawMark(ctx, X0 - 0.8, 610, 18, p.accent);
   text(ctx, t.footer, X0 + 22, 619, `500 13px ${p.body}`, p.ink3, "left", "middle");
   ctx.font = `500 13px ${p.body}`;
   const footerW = ctx.measureText(t.footer).width;
   text(ctx, "CC-Deskmeter", X0 + 22 + footerW + 8, 619, `600 15px ${p.wordmark}`, p.ink, "left", "middle");
-  text(ctx, data.readErrors.length ? t.incomplete : t.footerRight, CARD_WIDTH - 72, 619, `500 13px ${MONO}`, p.ink3, "right", "middle");
-
-  return canvas;
-}
-
-export function canvasToPng(canvas: HTMLCanvasElement): Promise<Blob> {
-  return new Promise((resolve, reject) =>
-    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Could not encode the PNG"))), "image/png"),
-  );
+  text(ctx, incomplete ? t.incomplete : t.footerRight, CARD_WIDTH - 72, 619, `500 13px ${MONO}`, p.ink3, "right", "middle");
 }
 
 /* Drawing helpers --------------------------------------------------------- */
@@ -493,12 +587,26 @@ function drawMark(ctx: CanvasRenderingContext2D, x: number, y: number, size: num
   ctx.restore();
 }
 
-/** Small letter-spaced eyebrow label. */
-function label(ctx: CanvasRenderingContext2D, value: string, x: number, y: number, p: CardPalette) {
+/** Small letter-spaced eyebrow label, faint unless given a `color`. Returns its width. */
+function label(ctx: CanvasRenderingContext2D, value: string, x: number, y: number, p: CardPalette, color = p.ink3): number {
   const spaced = "letterSpacing" in ctx;
   if (spaced) ctx.letterSpacing = "1.5px";
-  text(ctx, value, x, y, `600 12px ${MONO}`, p.ink3);
+  text(ctx, value, x, y, `600 12px ${MONO}`, color);
+  const width = ctx.measureText(value).width;
   if (spaced) ctx.letterSpacing = "0px";
+  return width;
+}
+
+/** A tool's mark, filled, in a `size` px square with its top-left at (x, y). */
+function drawToolMark(ctx: CanvasRenderingContext2D, mark: ToolMark, x: number, y: number, size: number, color: string) {
+  const [bx, by, bw, bh] = mark.box;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(size / bw, size / bh);
+  ctx.translate(-bx, -by);
+  ctx.fillStyle = color;
+  ctx.fill(new Path2D(mark.d));
+  ctx.restore();
 }
 
 /** Largest size (≤ `max`) at which `value` fits in `width`; `template` holds `{size}`. */

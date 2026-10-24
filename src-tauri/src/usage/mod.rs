@@ -14,8 +14,10 @@ mod quota;
 mod store;
 mod types;
 
-pub use paths::Roots;
+pub use archive::day_start;
+pub(crate) use archive::write_atomic;
+pub use paths::{Roots, display_dir};
 pub use pricing::Pricing;
 pub use quota::default_paths as quota_history_paths;
 pub use store::{UsageStore, lock};
-pub use types::{ArchiveSummary, UsageData};
+pub use types::{ArchiveSummary, ReadError, UsageData};

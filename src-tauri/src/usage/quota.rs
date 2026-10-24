@@ -6,6 +6,9 @@
 //! (`fh` = 5-hour %, `sd` = 7-day %). This is a local file, read like the
 //! transcripts: no network, no credentials. The organization id only keeps
 //! accounts apart and never leaves this module; the archive gets a hash of it.
+//! The transcripts don't say which account made a request, so the samples
+//! also tell when each account was signed in (`foreign_spans`): another
+//! account's requests count toward neither the current block nor the spend.
 //!
 //! Between two samples the quota is estimated from local spend:
 //! `estimate = last official % + k × quota-weighted spend since that sample`.
@@ -166,7 +169,7 @@ struct RawUsage {
 
 #[cfg(test)]
 pub fn parse(json: &str) -> Result<Vec<Sample>, String> {
-    parse_history(json).map(|(_, samples)| samples)
+    parse_history(json).map(|parsed| parsed.samples)
 }
 
 /// A stable tag for an organization id that does not reveal it, so the
@@ -177,10 +180,69 @@ fn account_tag(org: Option<&str>) -> String {
     })
 }
 
+/// A stretch of time, `[start, end)`.
+pub type Span = (DateTime<Utc>, DateTime<Utc>);
+
+/// The spans in which Desktop was signed in to another account than
+/// `account`, oldest first, from `(time, account tag)` readings in any order.
+/// An account's run of readings lasts from its first reading to the next
+/// account's first: Desktop reads the quota as it signs in, before any
+/// request (on real logs its first reading came before the first request
+/// every time it started). The first run reaches back to the start of time,
+/// `account`'s latest run lasts on, and readings without an account are
+/// skipped (they could be anyone's).
+pub fn foreign_spans<'a>(
+    readings: impl IntoIterator<Item = (DateTime<Utc>, &'a str)>,
+    account: &str,
+) -> Vec<Span> {
+    if account.is_empty() {
+        return Vec::new();
+    }
+    let mut readings: Vec<_> = readings
+        .into_iter()
+        .filter(|(_, tag)| !tag.is_empty())
+        .collect();
+    readings.sort_unstable();
+    // Readings after `account`'s latest would contradict it being signed in now.
+    let Some(latest) = readings.iter().rposition(|(_, tag)| *tag == account) else {
+        return Vec::new();
+    };
+    let mut spans = Vec::new();
+    let mut since = None;
+    for (index, &(at, tag)) in readings[..=latest].iter().enumerate() {
+        match (tag == account, since) {
+            (false, None) => {
+                since = Some(if index == 0 {
+                    DateTime::<Utc>::MIN_UTC
+                } else {
+                    at
+                })
+            }
+            (true, Some(start)) => {
+                spans.push((start, at));
+                since = None;
+            }
+            _ => {}
+        }
+    }
+    spans
+}
+
+/// Desktop's file as read.
+#[derive(Debug, Default)]
+struct Parsed {
+    /// The tag of the account that wrote the latest sample.
+    account: String,
+    /// That account's samples, oldest first.
+    samples: Vec<Sample>,
+    /// `(time, account tag)` of every sample with an account, oldest first.
+    timeline: Vec<(DateTime<Utc>, String)>,
+}
+
 /// The samples of the account that wrote the latest one, oldest first, with
 /// that account's tag. Errors on an unknown format, so a changed file never
 /// yields wrong numbers.
-fn parse_history(json: &str) -> Result<(String, Vec<Sample>), String> {
+fn parse_history(json: &str) -> Result<Parsed, String> {
     let raw: RawHistory = serde_json::from_str(json).map_err(|err| err.to_string())?;
     if raw.version != SUPPORTED_VERSION {
         return Err(format!("unsupported version {}", raw.version));
@@ -203,15 +265,23 @@ fn parse_history(json: &str) -> Result<(String, Vec<Sample>), String> {
         .collect();
     samples.sort_by_key(|(_, s)| s.at);
     let Some((latest_org, _)) = samples.last().cloned() else {
-        return Ok((String::new(), Vec::new()));
+        return Ok(Parsed::default());
     };
+    let timeline = samples
+        .iter()
+        .filter_map(|(org, s)| Some((s.at, account_tag(Some(org.as_deref()?)))))
+        .collect();
     let account = account_tag(latest_org.as_deref());
     let samples = samples
         .into_iter()
         .filter(|(org, _)| *org == latest_org)
         .map(|(_, s)| s)
         .collect();
-    Ok((account, samples))
+    Ok(Parsed {
+        account,
+        samples,
+        timeline,
+    })
 }
 
 type Stamp = (PathBuf, u64, Option<SystemTime>);
@@ -224,6 +294,7 @@ pub struct QuotaSource {
     stamp: Option<Stamp>,
     account: String,
     samples: Vec<Sample>,
+    timeline: Vec<(DateTime<Utc>, String)>,
     last_error: Option<String>,
 }
 
@@ -257,6 +328,11 @@ impl QuotaSource {
         (!self.samples.is_empty()).then_some(self.account.as_str())
     }
 
+    /// When each account's samples were taken (see `foreign_spans`).
+    pub fn timeline(&self) -> &[(DateTime<Utc>, String)] {
+        &self.timeline
+    }
+
     /// Returns whether the samples changed. A missing or unreadable file, or
     /// one in an unknown format, clears them (the quota is then hidden).
     /// Failed reads are retried even when the file's metadata is unchanged.
@@ -268,7 +344,11 @@ impl QuotaSource {
         let loaded = stamp
             .as_ref()
             .map_or_else(|| Ok(Default::default()), |(path, _, _)| load(path));
-        let (account, samples) = match loaded {
+        let Parsed {
+            account,
+            samples,
+            timeline,
+        } = match loaded {
             Ok(parsed) => {
                 self.stamp = stamp;
                 self.last_error = None;
@@ -287,11 +367,12 @@ impl QuotaSource {
         let changed = samples != self.samples || account != self.account;
         self.account = account;
         self.samples = samples;
+        self.timeline = timeline;
         changed
     }
 }
 
-fn load(path: &Path) -> Result<(String, Vec<Sample>), String> {
+fn load(path: &Path) -> Result<Parsed, String> {
     std::fs::read_to_string(path)
         .map_err(|err| err.to_string())
         .and_then(|text| parse_history(&text))
@@ -406,7 +487,8 @@ pub struct WeekStatus {
     pub pace_per_hour: Option<f64>,
     /// When the estimate reaches 100 % at that pace, if within two weeks.
     pub limit_at: Option<DateTime<Utc>>,
-    /// This machine's use since `period_start`, largest first. Empty until
+    /// This machine's use under the current account since `period_start`
+    /// (see `foreign_spans`), largest first. Empty until
     /// spend can be converted into % (see `QuotaWindow::calibrated`).
     pub projects: Vec<WeekShare>,
     pub models: Vec<WeekShare>,
@@ -810,6 +892,49 @@ mod tests {
         assert!(parse(r#"{"version":2,"samples":[{"t":1,"u":{"fh":"x","sd":1}}]}"#).is_err());
         assert!(parse("not json").is_err());
         assert!(parse(r#"{"version":2,"samples":[]}"#).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_timeline_keeps_every_account_and_tells_its_spans_apart() {
+        let json = r#"{"version":2,"samples":[
+            {"t":1792219963054,"org":"b","u":{"fh":7,"sd":3}},
+            {"t":1792219169847,"org":"a","u":{"fh":0,"sd":0}},
+            {"t":1792220000000,"u":{"fh":1,"sd":1}},
+            {"t":1792220862958,"org":"a","u":{"fh":11,"sd":2}}]}"#;
+        let parsed = parse_history(json).unwrap();
+        let (a, b) = (account_tag(Some("a")), account_tag(Some("b")));
+        let tags: Vec<&str> = parsed
+            .timeline
+            .iter()
+            .map(|(_, tag)| tag.as_str())
+            .collect();
+        assert_eq!(tags, [&a, &b, &a], "oldest first, without the unknown one");
+        assert_eq!(parsed.account, a);
+
+        // a until 0:30, b until 1:00, a again since; b's spans are the rest.
+        let readings = [
+            (at(15), "a"),
+            (at(0), "a"),
+            (at(30), "b"),
+            (at(45), "b"),
+            (at(50), ""),
+            (at(60), "a"),
+            (at(75), "a"),
+        ];
+        assert_eq!(foreign_spans(readings, "a"), [(at(30), at(60))]);
+        assert_eq!(
+            foreign_spans(readings[..4].iter().copied(), "b"),
+            [(DateTime::<Utc>::MIN_UTC, at(30))]
+        );
+        // Later readings of others than the account signed in now are left
+        // out, and an unknown account has no spans.
+        assert_eq!(
+            foreign_spans(readings, "b"),
+            [(DateTime::<Utc>::MIN_UTC, at(30))]
+        );
+        assert!(foreign_spans(readings, "").is_empty());
+        assert!(foreign_spans(readings, "c").is_empty());
+        assert!(foreign_spans(readings[..2].iter().copied(), "a").is_empty());
     }
 
     #[test]

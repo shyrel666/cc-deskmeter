@@ -73,7 +73,7 @@ Frontend tests use Node's built-in test runner (Node 20.19+ or 22.13+) and the e
 
 ## README screenshots
 
-The nine images in `docs/screenshots/` (dashboard, Mini HUD and share card in each theme) come from the browser demo, so they never show anyone's real usage. With `npm run dev` running in another terminal:
+The eighteen images in `docs/screenshots/` (each tool's dashboard and share card, and the Mini HUD with one tool and with both, in each theme) come from the browser demo, so they never show anyone's real usage. With `npm run dev` running in another terminal:
 
 ```bash
 node scripts/screenshots.mjs
@@ -83,11 +83,14 @@ The script drives a headless Chrome or Edge over the DevTools protocol and needs
 
 | File | What it shows |
 |---|---|
-| `dashboard-<theme>.png` | The dashboard at the default window size, 1314×850, 2x |
-| `mini-hud-<theme>.png` | The 320×140 Mini HUD with a 28 px margin, 2x |
-| `share-card-<theme>.png` | The share card, drawn by the same renderer as **Share** |
+| `dashboard-<theme>.png` | The Claude dashboard at the default window size, 1314×850, 2x |
+| `chatgpt-dashboard-<theme>.png` | The ChatGPT dashboard, the same way |
+| `mini-hud-<theme>.png` | The 320×140 Mini HUD (Claude) with a 28 px margin, 2x |
+| `mini-hud-dual-<theme>.png` | The 320×120 Mini HUD with both tools, the same way |
+| `share-card-<theme>.png` | The Claude share card, drawn by the same renderer as **Share** |
+| `chatgpt-share-card-<theme>.png` | The ChatGPT share card, the same way |
 
-Name themes to capture only those (`node scripts/screenshots.mjs glass-bento`). `--out <dir>` writes somewhere else, `--url <address>` points at a dev server that isn't on <http://127.0.0.1:1420>, and `--browser <path>` picks the browser when Chrome or Edge isn't found. The numbers come from `src/lib/demo.ts`: keep its `MODELS` on the current Claude models and their list prices. The script only connects to localhost.
+Name themes to capture only those (`node scripts/screenshots.mjs glass-bento`). `--out <dir>` writes somewhere else, `--url <address>` points at a dev server that isn't on <http://127.0.0.1:1420>, and `--browser <path>` picks the browser when Chrome or Edge isn't found. The numbers come from `src/lib/demo.ts` and `src/codex/demo.ts`: keep their models on the current Claude and OpenAI models and their list prices. The script only connects to localhost.
 
 ## Architecture
 

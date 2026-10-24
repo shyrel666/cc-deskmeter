@@ -133,6 +133,8 @@
   --pulse-brand-a: #c4b5fd;
   --pulse-brand-b: #8b5cf6;
   --pulse-brand-c: #60a5fa;
+  /* Fill of a switch that is on: the accent shading towards blue. */
+  --pulse-switch-on: linear-gradient(90deg, #8b5cf6 0%, #6366f1 100%);
 
   --pulse-font-display: var(--pulse-sans);
   --pulse-font-body: var(--pulse-sans);
@@ -141,6 +143,55 @@
   --pulse-radius-card: 24px;
   --pulse-radius-ctl: 12px;
   --pulse-radius-pill: 999px;
+}
+
+/* ── Codex view ────────────────────────────────────────────────────────── */
+/* The same three systems with a cool accent, so a glance tells the two tools apart.
+   The mini HUD takes the accent of the tool it shows; showing both, each row takes
+   its own (`data-provider` on the row). The wordmark is the app's, not the tool's:
+   it keeps its colours, while the mark beside it takes the tool's (Swiss's pulse
+   stroke, Glass's opal). */
+[data-theme="claude-warm"][data-provider="codex"],
+[data-theme="claude-warm"] [data-provider="codex"] {
+  --pulse-accent: #8db4d6;
+}
+[data-theme="swiss-industrial"][data-provider="codex"],
+[data-theme="swiss-industrial"] [data-provider="codex"] {
+  --pulse-accent: #1f5bff;
+}
+[data-theme="swiss-industrial"][data-provider="codex"] .wm-meter {
+  color: #ff4f00;
+}
+[data-theme="glass-bento"][data-provider="codex"],
+[data-theme="glass-bento"] [data-provider="codex"] {
+  --pulse-accent: #06b6d4;
+  --pulse-switch-on: linear-gradient(90deg, #06b6d4 0%, #0ea5e9 100%);
+  /* The mark's opal runs mint → cyan → sky, where Claude's runs lavender → violet → blue. */
+  --pulse-logo-a: #99f6e4;
+  --pulse-logo-b: #06b6d4;
+  --pulse-logo-c: #38bdf8;
+}
+[data-theme="glass-bento"][data-provider="codex"] .pulse-logo {
+  background:
+    radial-gradient(120% 90% at 0% 0%, rgba(6, 182, 212, 0.4), transparent 62%),
+    radial-gradient(120% 90% at 100% 100%, rgba(20, 184, 166, 0.3), transparent 62%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.03));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    0 10px 24px -12px rgba(6, 182, 212, 0.65);
+}
+[data-theme="glass-bento"][data-provider="codex"] .pulse-logo svg {
+  filter: drop-shadow(0 0 6px rgba(103, 232, 249, 0.5));
+}
+/* A Claude row in a window lit for Codex takes Claude's accent back. */
+[data-theme="claude-warm"] [data-provider="claude"] {
+  --pulse-accent: #d97757;
+}
+[data-theme="swiss-industrial"] [data-provider="claude"] {
+  --pulse-accent: #ff4f00;
+}
+[data-theme="glass-bento"] [data-provider="claude"] {
+  --pulse-accent: #8b5cf6;
 }
 
 /* ── Base ──────────────────────────────────────────────────────────────── */
@@ -716,6 +767,24 @@
   animation: intro-rise 400ms cubic-bezier(0.16, 1, 0.3, 1) calc(var(--intro-i, 0) * 45ms) both;
 }
 
+/* Switching tools pushes the new view in from the side its half of the switch sits on. */
+.provider-stage[data-push] {
+  animation: provider-push 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.provider-stage[data-push="next"] {
+  --push-from: 56px;
+}
+.provider-stage[data-push="prev"] {
+  --push-from: -56px;
+}
+
+@keyframes provider-push {
+  from {
+    opacity: 0;
+    transform: translateX(var(--push-from));
+  }
+}
+
 @keyframes intro-rise {
   from {
     opacity: 0;
@@ -736,10 +805,18 @@
 }
 
 /* ── Mini HUD ──────────────────────────────────────────────────────────── */
-/* The window itself is 320×140: never show page scrollbars. */
+/* The window itself is HUD-sized (320×140, or 320×120 with both tools): never show page scrollbars. */
 html[data-view="mini"],
 html[data-view="mini"] body {
   overflow: hidden;
+}
+
+/* Switching tools slides the other in from a shorter way off: the window is a quarter of the dashboard's width. */
+.hud-stage.provider-stage[data-push="next"] {
+  --push-from: 20px;
+}
+.hud-stage.provider-stage[data-push="prev"] {
+  --push-from: -20px;
 }
 
 /* Today's total flashes when a new response lands. */
@@ -782,6 +859,45 @@ html[data-view="tray"] body {
   background-image:
     radial-gradient(300px 220px at 0% 0%, rgba(139, 92, 246, 0.2), transparent 70%),
     radial-gradient(300px 240px at 100% 100%, rgba(59, 130, 246, 0.12), transparent 70%);
+}
+
+/* A tool's card: a tile of each theme's material, lit in a corner with the tool's own accent
+   (`data-provider` on the tile), that lights up under the pointer or the arrow keys. */
+.tray-tile {
+  border: 1px solid var(--pulse-line);
+  background-color: var(--pulse-surface);
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease;
+}
+[data-theme="claude-warm"] .tray-tile {
+  border-radius: 8px;
+  background-color: rgba(30, 30, 28, 0.7);
+  background-image: radial-gradient(220px 110px at 0% 0%, color-mix(in oklab, var(--pulse-accent) 9%, transparent), transparent 70%);
+  box-shadow: inset 0 1px 0 0 rgba(255, 236, 214, 0.035);
+}
+[data-theme="claude-warm"] .tray-tile:is(:hover, :focus-visible) {
+  background-color: rgba(40, 40, 37, 0.85);
+  border-color: var(--pulse-line-strong);
+}
+[data-theme="swiss-industrial"] .tray-tile {
+  border-radius: 6px;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    inset 0 1px 0 #ffffff;
+}
+[data-theme="swiss-industrial"] .tray-tile:is(:hover, :focus-visible) {
+  background-color: #fbfbf9;
+  border-color: var(--pulse-line-strong);
+}
+[data-theme="glass-bento"] .tray-tile {
+  border-radius: 14px;
+  background-color: rgba(255, 255, 255, 0.045);
+  background-image: radial-gradient(220px 110px at 0% 0%, color-mix(in oklab, var(--pulse-accent) 14%, transparent), transparent 70%);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.1);
+}
+[data-theme="glass-bento"] .tray-tile:is(:hover, :focus-visible) {
+  background-color: rgba(255, 255, 255, 0.08);
 }
 
 /* Browser preview: the panel over a desktop wallpaper. */

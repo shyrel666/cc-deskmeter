@@ -12,7 +12,7 @@ interface QuitDialogProps {
   error: CloseError | null;
   onCancel: () => void;
   onChoose: (action: CloseAction, dontAskAgain: boolean) => void;
-  /** Inside the 320×140 HUD window: title and actions only. */
+  /** Inside the HUD window (320×120 at its smallest): title and actions only, the error in the subtitle's place. */
   compact?: boolean;
 }
 
@@ -21,19 +21,33 @@ export function QuitDialog({ error, onCancel, onChoose, compact = false }: QuitD
   const { t } = useI18n();
   const [dontAsk, setDontAsk] = useState(false);
   const buttonSize = cn(compact && "h-7 px-3 text-[12px]");
+  const failure = error && (
+    <p
+      role="alert"
+      title={error.message}
+      className={cn("flex items-center gap-2 text-danger", compact ? "mt-0.5 text-[11px]" : "mt-3 text-[12px]")}
+    >
+      <AlertTriangle className="size-3.5 shrink-0" strokeWidth={2} aria-hidden />
+      <span className="min-w-0 truncate">
+        {error.action === "tray" ? t.quit.trayError(error.message) : t.quit.error(error.message)}
+      </span>
+    </p>
+  );
 
   return (
     <Dialog
       labelledBy="quit-title"
       onClose={onCancel}
-      className={compact ? "max-w-[288px] p-3" : "max-w-[400px]"}
+      // In the 120px HUD the panel is taller than the backdrop's padded box: the negative
+      // margins let it centre there instead of hanging from the top.
+      className={compact ? "-my-2 max-w-[288px] p-3" : "max-w-[400px]"}
     >
       <div className={cn("flex items-start", compact ? "gap-2.5" : "gap-3.5")}>
         <LogoMark className={compact ? "size-8" : "size-10"} markClassName={compact ? "size-[18px]" : "size-6"} />
         <div className={cn("min-w-0 flex-1", compact ? "leading-tight" : "pt-0.5")}>
           <DialogTitle id="quit-title">{t.quit.title}</DialogTitle>
           {compact ? (
-            <p className="mt-0.5 truncate text-[11px] text-ink-3">{t.quit.short}</p>
+            (failure ?? <p className="mt-0.5 truncate text-[11px] text-ink-3">{t.quit.short}</p>)
           ) : (
             <p className="mt-1.5 text-[12.5px] leading-relaxed text-ink-2">{t.quit.body}</p>
           )}
@@ -45,18 +59,7 @@ export function QuitDialog({ error, onCancel, onChoose, compact = false }: QuitD
         />
       </div>
 
-      {error && (
-        <p
-          role="alert"
-          title={error.message}
-          className={cn("flex items-center gap-2 text-danger", compact ? "mt-1.5 text-[11px]" : "mt-3 text-[12px]")}
-        >
-          <AlertTriangle className="size-3.5 shrink-0" strokeWidth={2} aria-hidden />
-          <span className="min-w-0 truncate">
-            {error.action === "tray" ? t.quit.trayError(error.message) : t.quit.error(error.message)}
-          </span>
-        </p>
-      )}
+      {!compact && failure}
 
       <div className={cn("flex items-center gap-2", compact ? "mt-2" : "mt-5")}>
         <label

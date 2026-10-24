@@ -1,3 +1,4 @@
+mod codex;
 mod share;
 mod tray;
 mod tray_panel;
@@ -10,6 +11,7 @@ use chrono::Utc;
 use tauri::webview::PageLoadEvent;
 use tauri::{Manager, PhysicalSize, Webview, WebviewWindow, Window, WindowEvent};
 
+use codex::{CodexData, CodexHistory, CodexHome, CodexStore};
 use usage::{ArchiveSummary, Pricing, Roots, UsageData, UsageStore};
 
 /// Space the dashboard leaves free inside the screen's work area, logical px.
@@ -18,6 +20,9 @@ const SCREEN_MARGIN: f64 = 16.0;
 
 /// Usage store shared by the `get_usage_data` command and the file watcher.
 struct UsageState(Arc<Mutex<UsageStore>>);
+
+/// Codex's store, shared by `get_codex_data` and its watcher.
+struct CodexState(Arc<Mutex<CodexStore>>);
 
 /// Initial load for the frontend; live updates arrive as `token-updated` events.
 #[tauri::command]
@@ -41,6 +46,40 @@ async fn get_usage_data(
     .map_err(|err| format!("failed to compute usage data: {err}"))?;
     tray::push(&app, &data);
     Ok(data)
+}
+
+/// Initial load of the Codex view; live updates arrive as `codex-updated` events.
+#[tauri::command]
+async fn get_codex_data(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, CodexState>,
+    force_rescan: Option<bool>,
+) -> Result<CodexData, String> {
+    let store = Arc::clone(&state.0);
+    // The first read decompresses and parses every rollout: off the async runtime.
+    let data = tauri::async_runtime::spawn_blocking(move || {
+        let mut store = codex::lock(&store);
+        if force_rescan.unwrap_or(false) {
+            store.rescan();
+        } else {
+            store.refresh();
+        }
+        store.snapshot(Utc::now())
+    })
+    .await
+    .map_err(|err| format!("failed to compute ChatGPT usage: {err}"))?;
+    tray::push_codex(&app, &data);
+    Ok(data)
+}
+
+/// Every day of Codex use and all time by model and effort, fetched when the
+/// Codex share card opens.
+#[tauri::command]
+async fn get_codex_history(state: tauri::State<'_, CodexState>) -> Result<CodexHistory, String> {
+    let store = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || codex::lock(&store).history(Utc::now()))
+        .await
+        .map_err(|err| format!("failed to compute the ChatGPT history: {err}"))
 }
 
 /// Lifetime blocks and the archive's files, fetched when the archive view opens.
@@ -133,6 +172,10 @@ pub fn run() {
             .with_quota_files(usage::quota_history_paths()),
     ));
 
+    let codex_store = Arc::new(Mutex::new(
+        CodexStore::new(CodexHome::discover()).with_pricing_file(Pricing::override_path()),
+    ));
+
     let (tray_state, tray_rx) = tray::Tray::new();
 
     let builder = tauri::Builder::default();
@@ -146,6 +189,7 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_opener::init())
         .manage(UsageState(Arc::clone(&store)))
+        .manage(CodexState(Arc::clone(&codex_store)))
         .manage(tray_state)
         .manage(tray_panel::Panel::default())
         .setup(move |app| {
@@ -157,19 +201,25 @@ pub fn run() {
             if let Err(err) = tray::spawn(app.handle(), tray_rx) {
                 eprintln!("cc-deskmeter: failed to create the tray icon: {err}");
             }
-            // The usage archive sits next to `tray.json`; without a config
-            // folder the app shows the transcripts alone.
+            // The usage archive and the ChatGPT sign-ins sit next to
+            // `tray.json`; without a config folder the app shows the logs alone.
             match app.path().app_config_dir() {
-                Ok(dir) => usage::lock(&store).open_archive(dir),
+                Ok(dir) => {
+                    codex::lock(&codex_store).open_signins(&dir);
+                    usage::lock(&store).open_archive(dir);
+                }
                 Err(err) => eprintln!("cc-deskmeter: no folder for the usage archive: {err}"),
             }
             watcher::spawn(app.handle().clone(), store);
+            watcher::spawn_codex(app.handle().clone(), codex_store);
             Ok(())
         })
         .on_page_load(|webview, payload| show_when_loaded(webview, payload.event()))
         .on_window_event(close_with_dashboard)
         .invoke_handler(tauri::generate_handler![
             get_usage_data,
+            get_codex_data,
+            get_codex_history,
             get_archive_summary,
             save_share_card,
             tray::set_tray_lang,

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::archive::{Archive, Row, session_tag};
 use super::pricing::Pricing;
+use super::quota::Span;
 use super::types::{
     ActiveBlock, BlockBucket, BlockRecord, BurnRate, DailyUsage, ModelUsage, MonthlyUsage,
     PastBlock, ProjectUsage, Projection, TokenCounts, UsageData, UsageEntry, UsageStats,
@@ -672,8 +673,9 @@ struct Fill {
     projects: HashMap<Arc<str>, FillProject>,
     models: HashMap<String, (Accum, bool)>,
     total: Accum,
-    /// Quota weight per archived day start, project and model.
-    quota: Vec<(DateTime<Utc>, Arc<str>, String, f64)>,
+    /// Quota weight per archived day `[start, end)`, project and model;
+    /// account attribution approximates missing request times by duration.
+    quota: Vec<(Span, Arc<str>, String, f64)>,
 }
 
 /// One ended block of the chain, with its live responses (none for an
@@ -717,6 +719,20 @@ pub struct History {
     overrides: Vec<Block>,
     /// Earliest request time added or replaced since `take_earliest_change`.
     earliest_change: Option<DateTime<Utc>>,
+    /// Spans another account than the one signed in now made the requests
+    /// in (`set_foreign`), oldest first.
+    foreign: Vec<Span>,
+    /// While `foreign` holds any, the latest block of the account signed in
+    /// now, which the current block and the quota go by instead of `blocks`.
+    own: Option<OwnBlock>,
+    own_dirty: bool,
+}
+
+/// The latest block of a chain over one account's requests (`None` before
+/// its first) and its usage in `BUCKET_MINUTES` buckets.
+struct OwnBlock {
+    block: Option<Block>,
+    buckets: [Accum; BUCKET_COUNT],
 }
 
 /// UTC offsets now and in mid-January and mid-July of this year. The current
@@ -999,7 +1015,7 @@ impl History {
                     .merge(&missing);
                 fill.total.merge(&missing);
                 fill.quota.push((
-                    day.start,
+                    (day.start, day.end),
                     Arc::clone(project),
                     model.clone(),
                     (cell.quota - have.quota).max(0.0),
@@ -1064,6 +1080,7 @@ impl History {
         let Some(changed) = self.blocks_dirty_from.take() else {
             return;
         };
+        self.own_dirty = true;
         let keep = self.blocks.partition_point(|block| block.end() < changed);
         let from = self
             .blocks
@@ -1103,11 +1120,92 @@ impl History {
         };
     }
 
-    /// Brings the calendar, the archive fill and the block chain up to date.
+    /// Requests within `spans` (oldest first) were another account's: from
+    /// the next snapshot on, the current block and the quota's spend leave
+    /// them out, so a switch carries neither a block nor its usage over.
+    pub fn set_foreign(&mut self, spans: Vec<Span>) {
+        if spans != self.foreign {
+            self.foreign = spans;
+            self.own_dirty = true;
+        }
+    }
+
+    pub fn foreign(&self) -> &[Span] {
+        &self.foreign
+    }
+
+    fn is_foreign(&self, requested_at: DateTime<Utc>) -> bool {
+        let next = self
+            .foreign
+            .partition_point(|(start, _)| *start <= requested_at);
+        next > 0 && requested_at < self.foreign[next - 1].1
+    }
+
+    /// The chain over the current account's requests agrees with `blocks`
+    /// before the first foreign span; from the block open as it began (or
+    /// from its end), it is built again without the foreign requests. An
+    /// archived block after that is left out: its responses are on disk
+    /// except when transcripts were deleted by hand.
+    fn refresh_own(&mut self) {
+        if !std::mem::take(&mut self.own_dirty) {
+            return;
+        }
+        let Some(&(first, first_end)) = self.foreign.first() else {
+            self.own = None;
+            return;
+        };
+        let shared = self.blocks.partition_point(|block| block.opened < first);
+        let mut chain: Vec<Block> = self.blocks[..shared].last().cloned().into_iter().collect();
+        let from = match chain.last() {
+            Some(block) if !block.archived && block.end() >= first => {
+                let opened = block.opened;
+                chain.clear();
+                opened
+            }
+            _ => first_end,
+        };
+        for entry in self
+            .ordered
+            .range((from, Arc::from(""))..)
+            .map(|(_, entry)| entry)
+        {
+            if self.is_foreign(entry.requested_at)
+                || chain
+                    .last()
+                    .is_some_and(|block| block.archived && entry.requested_at <= block.end())
+            {
+                continue;
+            }
+            push_block(&mut chain, entry);
+        }
+        let block = chain.pop();
+        let buckets = match &block {
+            Some(block) if !block.archived => block_buckets(
+                block.start(),
+                self.ordered
+                    .range((block.opened, Arc::from(""))..)
+                    .map(|(_, e)| e.as_ref())
+                    .filter(|e| !self.is_foreign(e.requested_at)),
+            ),
+            _ => [Accum::default(); BUCKET_COUNT],
+        };
+        self.own = Some(OwnBlock { block, buckets });
+    }
+
+    /// The latest block of the account signed in now, and its buckets.
+    fn current_block(&self) -> (Option<&Block>, &[Accum; BUCKET_COUNT]) {
+        match &self.own {
+            Some(own) => (own.block.as_ref(), &own.buckets),
+            None => (self.blocks.last(), &self.buckets),
+        }
+    }
+
+    /// Brings the calendar, the archive fill and the block chains up to date.
     fn refresh<Tz: TimeZone>(&mut self, now: DateTime<Utc>, tz: &Tz) {
         self.check_timezone(now, tz);
         self.refresh_fill();
         self.refresh_blocks();
+        self.refresh_own();
     }
 
     pub fn snapshot<Tz: TimeZone>(
@@ -1187,6 +1285,7 @@ impl History {
         let calendar = Calendar::new(&daily, today);
         let mut total = self.total;
         total.merge(&fill.total);
+        let (current, buckets) = self.current_block();
         UsageData {
             snapshot_id: 0,
             generated_at: now,
@@ -1197,16 +1296,16 @@ impl History {
             read_errors: Vec::new(),
             today: daily.get(&today).copied().unwrap_or_default().stats(),
             yesterday_so_far: self.yesterday_so_far(now, tz),
-            active_block: self.blocks.last().and_then(|block| {
+            active_block: current.and_then(|block| {
                 let ended = (0..self.blocks.len())
                     .rev()
                     .filter(|&index| {
-                        let block = &self.blocks[index];
-                        !block.archived && now > block.end()
+                        let past = &self.blocks[index];
+                        !past.archived && now > past.end() && past.end() < block.opened
                     })
                     .map(|index| (self.blocks[index].start(), self.members(index)));
                 let rest = usual_rest(ended, now - block.start());
-                active_block(block, &self.buckets, rest, now)
+                active_block(block, buckets, rest, now)
             }),
             peak_block: peak_block(&self.blocks, now),
             daily: calendar.daily,
@@ -1268,27 +1367,45 @@ impl History {
             .filter(move |entry| entry.timestamp > since)
     }
 
-    /// `(response time, quota spend)` of every response after `since`.
+    /// `(response time, quota spend)` of every response after `since`, but
+    /// those requested within a foreign span.
     pub fn quota_spend_since(&self, since: DateTime<Utc>) -> Vec<(DateTime<Utc>, f64)> {
         self.responses_after(since)
+            .filter(|entry| !self.is_foreign(entry.requested_at))
             .map(|entry| (entry.timestamp, entry.quota_usd))
             .collect()
     }
 
-    /// Quota spend of the responses after `since`, per project and per model,
-    /// with the archived usage of whole days after it. Call after `snapshot`.
+    /// Quota spend of the responses after `since` (but those requested within
+    /// a foreign span), per project and per model, with the archived usage
+    /// of whole days after it. Archived spend is approximated by the share
+    /// of each day's duration outside foreign spans. Call after `snapshot`.
     pub fn quota_spend_by_source(
         &self,
         since: DateTime<Utc>,
     ) -> (HashMap<Arc<str>, f64>, HashMap<String, f64>) {
         let mut projects: HashMap<Arc<str>, f64> = HashMap::new();
         let mut models: HashMap<String, f64> = HashMap::new();
-        for entry in self.responses_after(since) {
+        for entry in self
+            .responses_after(since)
+            .filter(|entry| !self.is_foreign(entry.requested_at))
+        {
             *projects.entry(Arc::clone(&entry.project)).or_default() += entry.quota_usd;
             *models.entry(entry.model.clone()).or_default() += entry.quota_usd;
         }
-        for (start, project, model, usd) in &self.fill.quota {
-            if *start >= since {
+        for ((start, end), project, model, usd) in &self.fill.quota {
+            if *start < since {
+                continue;
+            }
+            let duration = (*end - *start).num_milliseconds();
+            let foreign: i64 = self
+                .foreign
+                .iter()
+                .map(|&(from, to)| (to.min(*end) - from.max(*start)).num_milliseconds().max(0))
+                .sum();
+            let own = (duration - foreign).max(0);
+            if own > 0 {
+                let usd = usd * (own as f64 / duration as f64);
                 *projects.entry(Arc::clone(project)).or_default() += usd;
                 *models.entry(model.clone()).or_default() += usd;
             }
@@ -1296,9 +1413,12 @@ impl History {
         (projects, models)
     }
 
-    /// The latest local 5-hour block, open or ended. Call after `snapshot`.
+    /// The latest local 5-hour block of the account signed in now, open or
+    /// ended. Call after `snapshot`.
     pub fn last_block(&self) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-        self.blocks.last().map(|block| (block.start(), block.end()))
+        self.current_block()
+            .0
+            .map(|block| (block.start(), block.end()))
     }
 
     /// End of the latest block that had ended by `now`. Call after `snapshot`.
@@ -1778,12 +1898,28 @@ mod tests {
                 std::hint::black_box(history.snapshot(&meta, now, &Local));
                 append.push(start.elapsed().as_secs_f64() * 1000.0);
             }
-            for times in [&mut full, &mut idle, &mut append] {
+            // Another account's span before every request: the current
+            // account's chain is built again over all of them on each append.
+            history.set_foreign(vec![(
+                at("2026-10-16T23:00:00Z"),
+                at("2026-10-17T00:00:00Z"),
+            )]);
+            let mut switched = Vec::new();
+            for i in 0..5 {
+                let mut e = entries.last().unwrap().clone();
+                e.dedup_key = format!("switched-{i}").into();
+                e.timestamp = now;
+                let start = Instant::now();
+                history.insert(Arc::new(e), &Local);
+                std::hint::black_box(history.snapshot(&meta, now, &Local));
+                switched.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            for times in [&mut full, &mut idle, &mut append, &mut switched] {
                 times.sort_by(f64::total_cmp);
             }
             println!(
-                "entries={count} build_ms={build:.1} full_ms={:.3} cached_tick_ms={:.3} append_and_snapshot_ms={:.3}",
-                full[2], idle[2], append[2]
+                "entries={count} build_ms={build:.1} full_ms={:.3} cached_tick_ms={:.3} append_and_snapshot_ms={:.3} after_switch_ms={:.3}",
+                full[2], idle[2], append[2], switched[2]
             );
         }
     }
@@ -1879,6 +2015,161 @@ mod tests {
 
         let later = compute(&entries, &HashMap::new(), at("2026-10-17T15:00:01Z"), &Utc);
         assert!(later.active_block.is_none());
+    }
+
+    #[test]
+    fn the_current_accounts_chain_skips_every_span_of_another() {
+        let mut history = History::default();
+        // a's window of 01:00 ended before b signed in (07:00 to 08:00, and
+        // again 09:00 to 09:30).
+        for (key, ts) in [
+            ("a1", "2026-10-17T01:00:00Z"),
+            ("b1", "2026-10-17T07:10:00Z"),
+            ("a2", "2026-10-17T08:30:00Z"),
+            ("b2", "2026-10-17T09:10:00Z"),
+            ("a3", "2026-10-17T09:40:00Z"),
+            ("a4", "2026-10-17T10:00:00Z"),
+        ] {
+            history.insert(Arc::new(entry(key, ts, "p", 100)), &Utc);
+        }
+        history.set_foreign(vec![
+            (at("2026-10-17T07:00:00Z"), at("2026-10-17T08:00:00Z")),
+            (at("2026-10-17T09:00:00Z"), at("2026-10-17T09:30:00Z")),
+        ]);
+        let data = history.snapshot(&HashMap::new(), at("2026-10-17T10:30:00Z"), &Utc);
+        let block = data.active_block.unwrap();
+        assert_eq!(
+            (block.start_time, block.end_time, block.usage.message_count),
+            (at("2026-10-17T08:30:00Z"), at("2026-10-17T13:30:00Z"), 3)
+        );
+        let spend = history.quota_spend_since(DateTime::<Utc>::MIN_UTC);
+        assert_eq!(spend.len(), 4);
+        // The machine's chain still has b's request open its block.
+        assert_eq!(
+            history.ended_blocks(at("2026-10-17T12:10:01Z"))[1].start,
+            at("2026-10-17T07:10:00Z")
+        );
+    }
+
+    #[test]
+    fn another_accounts_requests_open_no_block_and_spend_nothing() {
+        let mut history = History::default();
+        // Account a from 08:05, b signed in at 10:00.
+        for (key, ts) in [
+            ("a1", "2026-10-17T08:05:00Z"),
+            ("a2", "2026-10-17T09:30:00Z"),
+            ("b1", "2026-10-17T10:03:00Z"),
+            ("b2", "2026-10-17T10:30:00Z"),
+        ] {
+            history.insert(Arc::new(entry(key, ts, "p", 100)), &Utc);
+        }
+        let block = |history: &mut History, now: &str| {
+            let data = history.snapshot(&HashMap::new(), at(now), &Utc);
+            let block = data.active_block?;
+            Some((block.start_time, block.end_time, block.usage.message_count))
+        };
+        let spend = |history: &History| -> Vec<DateTime<Utc>> {
+            let points = history.quota_spend_since(DateTime::<Utc>::MIN_UTC);
+            points.into_iter().map(|(at, _)| at).collect()
+        };
+        assert_eq!(
+            block(&mut history, "2026-10-17T11:00:00Z"),
+            Some((at("2026-10-17T08:00:00Z"), at("2026-10-17T13:00:00Z"), 4))
+        );
+
+        // As b: its window opened with its first request.
+        let switch = at("2026-10-17T10:00:00Z");
+        history.set_foreign(vec![(DateTime::<Utc>::MIN_UTC, switch)]);
+        assert_eq!(
+            block(&mut history, "2026-10-17T11:00:00Z"),
+            Some((switch, at("2026-10-17T15:00:00Z"), 2))
+        );
+        assert_eq!(
+            history.last_block(),
+            Some((switch, at("2026-10-17T15:00:00Z")))
+        );
+        assert_eq!(
+            spend(&history),
+            [at("2026-10-17T10:03:00Z"), at("2026-10-17T10:30:00Z")]
+        );
+        let (projects, _) = history.quota_spend_by_source(DateTime::<Utc>::MIN_UTC);
+        assert!((projects["p"] - 0.2).abs() < 1e-9);
+        // The machine's own chain, which the archive keeps, is untouched.
+        assert_eq!(history.ended_blocks(at("2026-10-17T13:00:01Z")).len(), 1);
+
+        // Requests that come in later join b's block.
+        history.insert(
+            Arc::new(entry("b3", "2026-10-17T10:50:00Z", "p", 100)),
+            &Utc,
+        );
+        assert_eq!(
+            block(&mut history, "2026-10-17T11:00:00Z"),
+            Some((switch, at("2026-10-17T15:00:00Z"), 3))
+        );
+
+        // As a, signed in again at 11:00 after b: a's own window from 08:00
+        // is still open, with a's requests only.
+        history.set_foreign(vec![(switch, at("2026-10-17T11:00:00Z"))]);
+        assert_eq!(
+            block(&mut history, "2026-10-17T11:30:00Z"),
+            Some((at("2026-10-17T08:00:00Z"), at("2026-10-17T13:00:00Z"), 2))
+        );
+        // Past its end, a has no open block until its next request.
+        assert_eq!(block(&mut history, "2026-10-17T13:00:01Z"), None);
+        assert_eq!(
+            history.last_block(),
+            Some((at("2026-10-17T08:00:00Z"), at("2026-10-17T13:00:00Z")))
+        );
+
+        // Signed in to b before any request of its own: no block yet.
+        let mut fresh = History::default();
+        fresh.insert(
+            Arc::new(entry("a1", "2026-10-17T09:00:00Z", "p", 100)),
+            &Utc,
+        );
+        fresh.set_foreign(vec![(DateTime::<Utc>::MIN_UTC, switch)]);
+        assert_eq!(block(&mut fresh, "2026-10-17T10:05:00Z"), None);
+        assert_eq!(fresh.last_block(), None);
+
+        // Without spans, everything counts again.
+        history.set_foreign(Vec::new());
+        assert_eq!(
+            block(&mut history, "2026-10-17T11:00:00Z"),
+            Some((at("2026-10-17T08:00:00Z"), at("2026-10-17T13:00:00Z"), 5))
+        );
+        assert_eq!(spend(&history).len(), 5);
+    }
+
+    #[test]
+    fn projection_ignores_past_blocks_overlapping_the_current_accounts_block() {
+        let entries = [
+            entry("a", "2026-10-17T08:00:00Z", "p", 100),
+            entry("b1", "2026-10-17T10:00:00Z", "p", 100),
+            entry("b2", "2026-10-17T12:00:00Z", "p", 200),
+        ];
+        let mut history = History::default();
+        for entry in &entries {
+            history.insert(Arc::new(entry.clone()), &Utc);
+        }
+        history.set_foreign(vec![(DateTime::<Utc>::MIN_UTC, entries[1].requested_at)]);
+        let now = at("2026-10-17T13:30:00Z");
+        let block = history
+            .snapshot(&HashMap::new(), now, &Utc)
+            .active_block
+            .unwrap();
+        assert_eq!(history.blocks.len(), 1);
+        assert!(history.blocks[0].end() > block.start_time);
+        assert!(now > history.blocks[0].end());
+        assert_eq!(block.usage.total_tokens, 300);
+        let expected = compute(&entries[1..], &HashMap::new(), now, &Utc)
+            .active_block
+            .unwrap();
+        assert_eq!(
+            block.projected.total_tokens,
+            expected.projected.total_tokens
+        );
+        assert_eq!(block.projected.total_tokens, 429);
+        assert!((block.projected.cost_usd - expected.projected.cost_usd).abs() < 1e-9);
     }
 
     #[test]
@@ -2067,6 +2358,51 @@ mod tests {
             (models["claude-opus-5-5"], models["claude-sonnet-5-5"]),
             (2.0, 4.0)
         );
+    }
+
+    #[test]
+    fn archived_quota_spend_excludes_foreign_days_and_prorates_partial_days() {
+        use super::super::archive::merge_days;
+
+        let start = at("2026-10-18T00:00:00Z");
+        let end = at("2026-10-19T00:00:00Z");
+        let now = end + TimeDelta::hours(12);
+        let mut live = History::default();
+        live.insert(
+            Arc::new(entry("gone", "2026-10-18T08:00:00Z", "p", 1000)),
+            &Utc,
+        );
+        let archive = Archive::from_parts(merge_days(&[], live.entries(), now, &Utc), Vec::new());
+        let mut history = History::default();
+        history.set_archive(&archive, &Pricing::default());
+        for (spans, expected) in [
+            (vec![(DateTime::<Utc>::MIN_UTC, end)], 0.0),
+            (
+                vec![(DateTime::<Utc>::MIN_UTC, start + TimeDelta::hours(12))],
+                0.5,
+            ),
+            (
+                vec![
+                    (start, start + TimeDelta::hours(6)),
+                    (end - TimeDelta::hours(6), end),
+                ],
+                0.5,
+            ),
+            (vec![(end, now)], 1.0),
+            (Vec::new(), 1.0),
+        ] {
+            history.set_foreign(spans);
+            let data = history.snapshot(&HashMap::new(), now, &Utc);
+            assert_eq!(data.total.message_count, 1);
+            assert_eq!(history.filled_responses(), 1);
+            let (projects, models) = history.quota_spend_by_source(start);
+            if expected == 0.0 {
+                assert!(projects.is_empty() && models.is_empty());
+            } else {
+                assert!((projects["p"] - expected).abs() < 1e-9);
+                assert!((models["claude-opus-5-5"] - expected).abs() < 1e-9);
+            }
+        }
     }
 
     #[test]

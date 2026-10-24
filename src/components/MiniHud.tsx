@@ -1,37 +1,61 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { Maximize2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Bar, BarChart, BarStack, ResponsiveContainer, YAxis } from "recharts";
 
+import { CodexHud } from "../codex/CodexHud";
+import { leadWindow } from "../codex/pace";
+import { useWhen } from "../codex/parts";
+import { totalOf, type CodexData } from "../codex/types";
 import { useAnimatedNumber } from "../hooks/useAnimatedNumber";
+import type { HudLayout } from "../hooks/useHudLayout";
+import { HUD_SIZES, startWindowDrag } from "../hooks/useMiniMode";
 import { useNow } from "../hooks/useNow";
-import type { FeedStatus } from "../hooks/useUsageData";
-import { HUD_SIZE, startWindowDrag } from "../hooks/useMiniMode";
+import type { Provider } from "../hooks/useProvider";
 import { useI18n } from "../i18n/I18nProvider";
 import { cn } from "../lib/cn";
-import { formatTokens, formatCost, splitDuration } from "../lib/format";
+import { formatCost, formatPercent, formatTokens } from "../lib/format";
 import { blockPoints, dailyPoints } from "../lib/series";
+import type { FeedState } from "../lib/usageFeed";
 import { useTheme } from "../theme/ThemeProvider";
 import type { UsageData } from "../types";
+import { quotaColor } from "./Header";
+import {
+  CONTROLS_ROOM,
+  feedHealth,
+  HudControls,
+  HudCountdown,
+  HudFrame,
+  HudLamp,
+  HudTag,
+  HudToday,
+  providerOption,
+  useBump,
+  useCountdown,
+} from "./HudFrame";
+import { IntroStage, useIntroPhase } from "./IntroStage";
+import { Meter } from "./ui/Meter";
 
 /** Plotted series: real I/O only. Cache reads would flatten a 38px chart. */
 const HUD_SERIES = ["output", "input", "cacheWrite"] as const;
 const BLOCK_SECONDS = 5 * 3600;
 
 interface MiniHudProps {
-  data: UsageData | null;
-  status: FeedStatus;
-  error: string | null;
-  revision: number;
+  claude: FeedState<UsageData>;
+  codex: FeedState<CodexData>;
   todayKey: string;
+  /** The tool shown on its own: the dashboard's. */
+  provider: Provider;
+  layout: HudLayout;
+  onSwitch: (provider: Provider) => void;
+  onLayout: (layout: HudLayout) => void;
   onExit: () => void;
   /** Running inside the desktop app (the HUD is the whole window). */
   native: boolean;
 }
 
 /**
- * Compact always-on-top view: 5h block countdown, burn rate, today's tokens
- * and API-equivalent cost, and the token flow of the current block.
+ * Compact always-on-top view of one tool (Claude or Codex, `C` switches) or
+ * of both stacked. The frame is the same for each; the tool fills it in.
  */
 export function MiniHud({ native, ...props }: MiniHudProps) {
   const { t } = useI18n();
@@ -43,169 +67,158 @@ export function MiniHud({ native, ...props }: MiniHudProps) {
     );
   }
   // Browser demo: preview the HUD at its real window size.
+  const size = HUD_SIZES[props.layout];
   return (
     <div className="grid min-h-screen place-items-center bg-canvas p-4 font-body text-ink">
       <div className="text-center">
         <div
           className="pulse-card mx-auto overflow-hidden !rounded-[8px] shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)] swiss:shadow-[0_18px_40px_-18px_rgba(17,17,16,0.35),0_2px_4px_rgba(0,0,0,0.04),inset_0_1px_0_#fff]"
-          style={{ width: HUD_SIZE.width, height: HUD_SIZE.height }}
+          style={{ width: size.width, height: size.height }}
         >
           <HudBody {...props} />
         </div>
         <p className="mt-4 max-w-[340px] text-[12px] leading-relaxed text-ink-3">
-          {t.mini.preview(`${HUD_SIZE.width}×${HUD_SIZE.height}`)}
+          {t.mini.preview(`${size.width}×${size.height}`)}
         </p>
       </div>
     </div>
   );
 }
 
-function HudBody({ data, status, error, revision, todayKey, onExit }: Omit<MiniHudProps, "native">) {
-  const { theme } = useTheme();
+function HudBody({ claude, codex, todayKey, provider, layout, onSwitch, onLayout, onExit }: Omit<MiniHudProps, "native">) {
   const { t } = useI18n();
-  const now = useNow(1000);
-  const digital = theme.instrument;
-  const block = data?.activeBlock ?? null;
-  const remaining = block ? (Date.parse(block.endTime) - now) / 1000 : 0;
-  const live = block !== null && remaining > 0;
-  const today = data?.today;
-  // Rolled up when the HUD opens, eased on updates.
-  const todayTokens = useAnimatedNumber(today?.totalTokens ?? 0);
-  const todayCost = useAnimatedNumber(today?.costUsd ?? 0);
-
-  // Flash today's total whenever a new response lands.
-  const [bump, setBump] = useState(0);
-  const previous = useRef(today?.totalTokens);
-  useEffect(() => {
-    if (today === undefined) return;
-    if (previous.current !== undefined && previous.current !== today.totalTokens) setBump((n) => n + 1);
-    previous.current = today.totalTokens;
-  }, [today]);
-
-  const { hours, minutes, seconds } = splitDuration(remaining);
-  const pad = (n: number) => n.toString().padStart(2, "0");
-  const dotColor = status === "live" || status === "demo" ? "var(--pulse-good)" : "var(--pulse-warn)";
-  const unhealthy = status === "error" || status === "partial";
-  const healthHint = error ?? (status === "partial" ? t.app.incomplete : t.status[status]);
+  const phase = useIntroPhase();
+  const push = usePush(provider, layout);
+  const single = layout === "single";
+  const other = provider === "claude" ? "codex" : "claude";
+  let body: ReactNode;
+  if (!single) {
+    body = (
+      <DualHud
+        claude={claude}
+        codex={codex}
+        onPick={(next) => {
+          onSwitch(next);
+          onLayout("single");
+        }}
+      />
+    );
+  } else if (provider === "codex") {
+    body = <CodexHud feed={codex} onSwitch={() => onSwitch(other)} />;
+  } else {
+    body = <ClaudeHud feed={claude} todayKey={todayKey} onSwitch={() => onSwitch(other)} />;
+  }
 
   return (
     <div
       onMouseDown={startWindowDrag}
-      className="relative flex h-full w-full cursor-default select-none flex-col px-3 pb-3 pt-2"
+      className="relative h-full w-full cursor-default select-none text-left"
       title={isTauri() ? t.mini.drag : undefined}
     >
-      {/* Row 1 · block countdown, burn rate, restore */}
-      <div className="flex h-5 items-center gap-2 text-[11px]">
-        <span
-          key={revision}
-          className="pulse-dot shrink-0 !size-1.5"
-          data-idle={!live && !unhealthy}
-          title={healthHint}
-          aria-label={healthHint}
-          style={{ "--dot": live || unhealthy ? dotColor : "var(--pulse-ink-3)" } as CSSProperties}
-        />
-        {unhealthy ? <span className="truncate text-warn" title={healthHint}>{t.status[status]}</span> : live ? (
-          <span className="flex min-w-0 items-baseline gap-1.5 whitespace-nowrap">
-            <span className="pulse-label !text-[10px]">{t.mini.resets}</span>
-            <span className="num font-medium text-ink">
-              {digital ? `${pad(hours)}:${pad(minutes)}:${pad(seconds)}` : t.time.hms(hours, pad(minutes), pad(seconds))}
-            </span>
-          </span>
-        ) : (
-          <span className="truncate text-ink-3">{t.mini.noBlock}</span>
-        )}
-        <span className="ml-auto whitespace-nowrap num text-ink-2" title={t.mini.burnRate}>
-          {live ? formatTokens(block.burnRate.tokensPerMinute) : "—"}
-          <span className="text-ink-3">{t.common.perMin}</span>
-        </span>
-        <button
-          type="button"
-          onClick={onExit}
-          aria-label={t.mini.back}
-          title={t.mini.back}
-          className={cn(
-            "-mr-1 grid size-5 shrink-0 place-items-center text-ink-3 transition-colors hover:text-ink",
-            "warm:rounded-md warm:hover:bg-raised swiss:rounded-[4px] swiss:hover:bg-raised glass:rounded-full glass:hover:bg-white/10",
-          )}
-        >
-          <Maximize2 className="size-3" strokeWidth={2} aria-hidden />
-        </button>
+      {/* Each tool is its own stage, as on the dashboard: switching slides the other in and replays its entrance. */}
+      <div key={single ? provider : "dual"} className="hud-stage provider-stage h-full" data-push={push ?? undefined}>
+        <IntroStage ready={phase !== "wait"} className="h-full">
+          {body}
+        </IntroStage>
       </div>
-
-      {/* Row 2 · today */}
-      <div className="mt-1.5 flex items-end justify-between gap-3">
-        <div className="min-w-0">
-          <div
-            key={bump}
-            className={cn(
-              "num num-hero text-[26px] font-semibold leading-none text-ink",
-              bump > 0 && "hud-bump",
-            )}
-          >
-            {today ? formatTokens(todayTokens) : "—"}
-          </div>
-          <div className="pulse-label mt-1 !text-[10px]">{t.mini.tokensToday}</div>
-        </div>
-        <div className="text-right" title={today?.unpricedMessageCount ? t.app.unpriced(today.unpricedMessageCount) : undefined}>
-          <div className="num text-[17px] font-semibold leading-none text-accent">
-            {today ? formatCost(todayCost, today.unpricedMessageCount, t.common.unpriced) : "—"}
-          </div>
-          <div className="pulse-label mt-1 !text-[10px]">
-            {live ? (
-              <>
-                <span className="num">{formatCost(block.burnRate.costPerHour, block.usage.unpricedMessageCount, t.common.unpriced)}</span>
-                <span className="normal-case">{t.common.perHour}</span>
-              </>
-            ) : (
-              t.mini.apiEquivalent
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Row 3 · token flow */}
-      <div className="mt-auto h-[38px]" aria-hidden>
-        {data && <HudChart data={data} todayKey={todayKey} live={live} />}
-      </div>
-
-      {/* Block progress along the bottom edge */}
-      {live &&
-        (theme.meter === "scale" ? (
-          <EdgeScale value={1 - remaining / BLOCK_SECONDS} />
-        ) : (
-          <div className="absolute inset-x-0 bottom-0 h-[2px] bg-track">
-            <div
-              className="h-full bg-accent transition-[width] duration-1000 ease-linear glass:bg-gradient-to-r glass:from-[#8B5CF6] glass:to-[#3B82F6]"
-              style={{ width: `${Math.min(100, (1 - remaining / BLOCK_SECONDS) * 100)}%` }}
-            />
-          </div>
-        ))}
+      {/* The controls stay put while the tools slide beneath them: at the end of the first row, or of the last with both. */}
+      <HudControls
+        layout={layout}
+        onLayout={onLayout}
+        onExit={onExit}
+        className={single ? "top-[9px]" : "bottom-[9px]"}
+      />
     </div>
   );
 }
 
-/** Swiss Industrial: a tick scale along the bottom edge, one tick per 10 minutes, orange up to now. */
-function EdgeScale({ value }: { value: number }) {
-  const ticks = 30;
+/** The side a tool that was just switched to slides in from; a new layout just redraws. */
+function usePush(provider: Provider, layout: HudLayout) {
+  const [seen, setSeen] = useState({ provider, layout });
+  const [push, setPush] = useState<"next" | "prev" | null>(null);
+  if (seen.provider !== provider || seen.layout !== layout) {
+    setSeen({ provider, layout });
+    setPush(layout === "single" && seen.layout === "single" ? (provider === "codex" ? "next" : "prev") : null);
+  }
+  return push;
+}
+
+interface ClaudeHudProps {
+  feed: FeedState<UsageData>;
+  todayKey: string;
+  /** Switches the HUD to Codex. */
+  onSwitch: () => void;
+}
+
+/**
+ * The mini HUD for Claude: 5h block countdown, burn rate, today's tokens and
+ * API-equivalent cost, and the token flow of the current block.
+ */
+function ClaudeHud({ feed, todayKey, onSwitch }: ClaudeHudProps) {
+  const { t } = useI18n();
+  const now = useNow(1000);
+  const { data, status, error, revision } = feed;
+  const block = data?.activeBlock ?? null;
+  const remaining = block ? (Date.parse(block.endTime) - now) / 1000 : 0;
+  const live = block !== null && remaining > 0;
+  const today = data?.today;
+  const { unhealthy, hint } = feedHealth(t, status, error, t.app.incomplete);
+
   return (
-    <svg className="absolute inset-x-0 bottom-0 h-[6px] w-full" aria-hidden>
-      {Array.from({ length: ticks - 1 }, (_, n) => {
-        const i = n + 1;
-        const x = `${(i / ticks) * 100}%`;
-        return (
-          <line
-            key={i}
-            x1={x}
-            x2={x}
-            y1={6}
-            y2={i % 6 === 0 ? 0 : 3}
-            stroke={i / ticks <= value ? "#FF4F00" : "#B5B5AC"}
-            strokeWidth={1}
-            shapeRendering="crispEdges"
-          />
-        );
-      })}
-    </svg>
+    <HudFrame
+      provider="claude"
+      onSwitch={onSwitch}
+      lamp={
+        <HudLamp
+          status={status}
+          revision={revision}
+          live={live}
+          unhealthy={unhealthy}
+          hint={hint}
+          busy={data === null && status === "connecting"}
+        />
+      }
+      top={
+        <>
+          {unhealthy ? (
+            <span className="truncate text-warn" title={hint}>
+              {t.status[status]}
+            </span>
+          ) : live ? (
+            <HudCountdown remaining={remaining} />
+          ) : (
+            <span className="truncate text-ink-3">{t.mini.noBlock}</span>
+          )}
+          <span className="ml-auto whitespace-nowrap num text-ink-2" title={t.mini.burnRate}>
+            {live ? formatTokens(block.burnRate.tokensPerMinute) : "—"}
+            <span className="text-ink-3">{t.common.perMin}</span>
+          </span>
+        </>
+      }
+      edge={live ? 1 - remaining / BLOCK_SECONDS : null}
+    >
+      <HudToday
+        tokens={today?.totalTokens}
+        costUsd={today?.costUsd ?? 0}
+        unpriced={today?.unpricedMessageCount ?? 0}
+        costHint={today?.unpricedMessageCount ? t.app.unpriced(today.unpricedMessageCount) : undefined}
+        detail={
+          live ? (
+            <>
+              <span className="num">{formatCost(block.burnRate.costPerHour, block.usage.unpricedMessageCount, t.common.unpriced)}</span>
+              <span className="normal-case">{t.common.perHour}</span>
+            </>
+          ) : (
+            t.mini.apiEquivalent
+          )
+        }
+      />
+
+      {/* Token flow */}
+      <div className="mt-auto h-[38px]" aria-hidden>
+        {data && <HudChart data={data} todayKey={todayKey} live={live} />}
+      </div>
+    </HudFrame>
   );
 }
 
@@ -242,5 +255,203 @@ function HudChart({ data, todayKey, live }: { data: UsageData; todayKey: string;
         </BarStack>
       </BarChart>
     </ResponsiveContainer>
+  );
+}
+
+interface DualHudProps {
+  claude: FeedState<UsageData>;
+  codex: FeedState<CodexData>;
+  /** Shows that tool on its own. */
+  onPick: (provider: Provider) => void;
+}
+
+/**
+ * Both tools, a row each: the 5-hour limit (for Claude the predicted quota,
+ * else the block's clock, as in the header) and today's tokens and cost.
+ * Their resets share the last row.
+ */
+function DualHud({ claude, codex, onPick }: DualHudProps) {
+  const { t } = useI18n();
+  const now = useNow(1000);
+
+  const block = claude.data?.activeBlock ?? null;
+  const remaining = block ? (Date.parse(block.endTime) - now) / 1000 : 0;
+  const blockLive = block !== null && remaining > 0;
+  const estimate = claude.data?.quota?.fiveHour ?? null;
+  const claudeHealth = feedHealth(t, claude.status, claude.error, t.app.incomplete);
+  const claudeToday = claude.data?.today;
+
+  // ChatGPT's 5-hour window, or its week on a plan without one.
+  const lead = leadWindow(codex.data?.current ?? null, now);
+  const codexWindow = lead?.window ?? null;
+  const codexWeekly = lead?.weekly ?? false;
+  const resetsAt = codexWindow?.resetsAt ? Date.parse(codexWindow.resetsAt) : null;
+  const codexHealth = feedHealth(t, codex.status, codex.error, t.codex.readError);
+  const codexToday = codex.data && codex.data.fileCount > 0 ? codex.data.today : undefined;
+
+  return (
+    <div className="flex h-full w-full flex-col px-3 pb-2 pt-2.5">
+      {/* Tag, lamp, 5-hour bar and share, today's tokens and cost: one grid, so both rows line up. */}
+      <div className="grid grid-cols-[max-content_6px_minmax(0,1fr)_max-content_max-content_max-content] items-center gap-x-2 gap-y-2.5">
+        {/* The figures are today's, not the window's: the one thing the rows can't say for themselves. */}
+        <span className="pulse-label col-span-2 col-start-5 text-right !text-[10px] leading-none">{t.common.today}</span>
+        <DualRow
+          provider="claude"
+          lamp={
+            <HudLamp
+              status={claude.status}
+              revision={claude.revision}
+              live={blockLive}
+              {...claudeHealth}
+              busy={claude.data === null && claude.status === "connecting"}
+            />
+          }
+          meter={
+            !blockLive
+              ? null
+              : estimate
+                ? {
+                    value: estimate.estimatePercent / 100,
+                    label: t.header.quotaLabel(Math.round(estimate.estimatePercent)),
+                    warning: quotaColor(estimate.estimatePercent),
+                    dim: claude.data?.quota?.stale,
+                  }
+                : { value: 1 - remaining / BLOCK_SECONDS, label: t.header.elapsed }
+          }
+          tokens={claudeToday?.totalTokens}
+          costUsd={claudeToday?.costUsd ?? 0}
+          unpriced={claudeToday?.unpricedMessageCount ?? 0}
+          onPick={onPick}
+        />
+        <DualRow
+          provider="codex"
+          lamp={
+            <HudLamp
+              status={codex.status}
+              revision={codex.revision}
+              live={resetsAt !== null}
+              {...codexHealth}
+              busy={codex.data === null && codex.status === "connecting"}
+            />
+          }
+          meter={
+            codexWindow && {
+              value: codexWindow.usedPercent / 100,
+              label: (codexWeekly ? t.codex.weekQuotaLabel : t.codex.quotaLabel)(Math.round(codexWindow.usedPercent)),
+              warning: quotaColor(codexWindow.usedPercent),
+              dim: resetsAt === null,
+              tag: codexWeekly ? t.mini.week : undefined,
+            }
+          }
+          tokens={codexToday && totalOf(codexToday.tokens)}
+          costUsd={codexToday?.costUsd ?? 0}
+          unpriced={codexToday?.unpriced ?? 0}
+          onPick={onPick}
+        />
+      </div>
+
+      <div className={cn("mt-auto flex h-5 items-center gap-3 text-[11px]", CONTROLS_ROOM)}>
+        <span className="pulse-label shrink-0 !text-[10px]">{codexWeekly ? t.mini.resetsAny : t.mini.resets}</span>
+        <ResetClock
+          provider="claude"
+          remaining={blockLive ? remaining : null}
+          idle={claude.data !== null && !blockLive}
+          trouble={claudeHealth.unhealthy ? t.status[claude.status] : null}
+        />
+        <ResetClock
+          provider="codex"
+          remaining={resetsAt === null ? null : (resetsAt - now) / 1000}
+          idle={codexWindow !== null && resetsAt === null}
+          weeklyAt={codexWeekly && resetsAt !== null ? new Date(resetsAt) : null}
+          trouble={codexHealth.unhealthy ? t.status[codex.status] : null}
+        />
+      </div>
+    </div>
+  );
+}
+
+interface DualRowProps {
+  provider: Provider;
+  lamp: ReactNode;
+  /**
+   * The 5-hour bar, `warning` near the limit; null while no window is open.
+   * `tag` names another window it shows instead (ChatGPT's week on a plan without a 5-hour one).
+   */
+  meter: { value: number; label: string; warning?: string; dim?: boolean; tag?: string } | null;
+  tokens: number | undefined;
+  costUsd: number;
+  unpriced: number;
+  onPick: (provider: Provider) => void;
+}
+
+/** One tool's row, in its own accent: tag and lamp, 5-hour bar and share, today's tokens and cost. */
+function DualRow({ provider, lamp, meter, tokens, costUsd, unpriced, onPick }: DualRowProps) {
+  const { t } = useI18n();
+  const shown = useAnimatedNumber(tokens ?? 0);
+  const bump = useBump(tokens);
+  const dim = !meter || meter.dim;
+  return (
+    <div data-provider={provider} className="col-span-full grid grid-cols-subgrid items-center">
+      <HudTag provider={provider} hint={t.mini.only(providerOption(provider).label)} onClick={() => onPick(provider)} />
+      {/* Close to its tag, a little apart from the bar. */}
+      <span className="-ml-1 flex">{lamp}</span>
+      <Meter
+        value={meter?.value ?? 0}
+        label={meter?.label ?? t.common.noActiveBlock}
+        size="sm"
+        // Codex's bars take its accent, as in its view; Claude's keep each theme's own fill.
+        color={meter?.warning ?? (provider === "codex" ? "var(--pulse-accent)" : undefined)}
+        live={!dim}
+        className={cn(dim && "opacity-60")}
+      />
+      <span
+        className={cn("num text-right text-[10.5px] leading-none", dim ? "text-ink-3" : "text-ink-2")}
+        style={{ color: meter?.warning }}
+      >
+        {meter?.tag && <span className="mr-1 text-ink-3">{meter.tag}</span>}
+        {meter ? formatPercent(meter.value, 0) : "—"}
+      </span>
+      <span
+        key={bump}
+        className={cn("num num-hero text-right text-[19px] font-semibold leading-none text-ink", bump > 0 && "hud-bump")}
+      >
+        {tokens === undefined ? "—" : formatTokens(shown)}
+      </span>
+      <span className="num text-right text-[11px] leading-none text-ink-3">
+        {tokens === undefined ? "" : formatCost(costUsd, unpriced, t.common.unpriced, { compact: true })}
+      </span>
+    </div>
+  );
+}
+
+interface ResetClockProps {
+  provider: Provider;
+  /** Seconds to the reset; null while no window is open. */
+  remaining: number | null;
+  /** No window is open: the next request opens one. */
+  idle: boolean;
+  /** What is wrong with the tool's feed. */
+  trouble: string | null;
+  /** When its week resets, on a plan without a 5-hour window: the day, as days to go would not fit. */
+  weeklyAt?: Date | null;
+}
+
+/** A tool's mark and the time to its 5-hour reset. */
+function ResetClock({ provider, remaining, idle, trouble, weeklyAt = null }: ResetClockProps) {
+  const { t } = useI18n();
+  const { when } = useWhen();
+  const countdown = useCountdown();
+  const option = providerOption(provider);
+  return (
+    <span className="flex min-w-0 items-center gap-1 whitespace-nowrap">
+      <option.Mark className={cn("size-2.5 shrink-0", option.lit)} />
+      {trouble ? (
+        <span className="truncate text-warn">{trouble}</span>
+      ) : remaining === null ? (
+        <span className="text-ink-3">{idle ? t.mini.idle : "—"}</span>
+      ) : (
+        <span className="num font-medium text-ink">{weeklyAt ? when(weeklyAt) : countdown(remaining)}</span>
+      )}
+    </span>
   );
 }

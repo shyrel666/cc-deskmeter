@@ -220,6 +220,14 @@ impl Pricing {
         self.overrides.len()
     }
 
+    /// Every override by its normalized name, in the file's (sorted) name
+    /// order: Codex prices its own models from the same file.
+    pub fn overrides(&self) -> impl Iterator<Item = (&str, &ModelRates)> {
+        self.overrides
+            .iter()
+            .map(|(key, rates)| (key.as_str(), rates))
+    }
+
     /// The most specific match among the overrides and the built-in table:
     /// the key whose match reaches furthest into the model id, then the
     /// longer key, and an override wins a tie. So `claude-opus-4` reprices

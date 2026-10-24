@@ -2,16 +2,22 @@ import type { UsageData } from "../types";
 
 export type FeedStatus = "connecting" | "live" | "partial" | "demo" | "error";
 
-export interface FeedState {
-  data: UsageData | null;
+/** What a feed reads of a snapshot: the store's order and its read health. */
+export interface FeedData {
+  snapshotId: number;
+  readErrors: unknown[];
+}
+
+export interface FeedState<T extends FeedData = UsageData> {
+  data: T | null;
   status: FeedStatus;
   error: string | null;
   revision: number;
 }
 
-export interface UsageTransport {
-  subscribe: (receive: (data: UsageData) => void) => Promise<() => void>;
-  load: (forceRescan: boolean) => Promise<UsageData>;
+export interface UsageTransport<T extends FeedData = UsageData> {
+  subscribe: (receive: (data: T) => void) => Promise<() => void>;
+  load: (forceRescan: boolean) => Promise<T>;
 }
 
 interface RetryScheduler {
@@ -27,8 +33,8 @@ const timers: RetryScheduler = {
 
 /** Snapshots are ordered by the store, independently of command/event delivery
  * order and clock changes. Each mounted consumer owns one feed lifecycle. */
-export class UsageFeed {
-  private data: UsageData | null = null;
+export class UsageFeed<T extends FeedData = UsageData> {
+  private data: T | null = null;
   private revision = 0;
   private disposed = false;
   private unlisten?: () => void;
@@ -40,8 +46,8 @@ export class UsageFeed {
   private retryDelay = 1_000;
 
   constructor(
-    private transport: UsageTransport,
-    private changed: (state: FeedState) => void,
+    private transport: UsageTransport<T>,
+    private changed: (state: FeedState<T>) => void,
     private scheduler: RetryScheduler = timers,
   ) {}
 
@@ -116,7 +122,7 @@ export class UsageFeed {
     }
   }
 
-  private accept(next: UsageData): boolean {
+  private accept(next: T): boolean {
     if (this.disposed || (this.data && next.snapshotId <= this.data.snapshotId)) return false;
     this.data = next;
     this.revision += 1;

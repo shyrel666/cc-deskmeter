@@ -1,5 +1,7 @@
 //! Watches every transcript root and pushes fresh usage data to the
-//! frontend as the `token-updated` event, and to the tray icon.
+//! frontend as the `token-updated` event, and to the tray icon. Codex's
+//! rollout folders get a watcher of their own (`spawn_codex`), which sends
+//! `codex-updated` and feeds the tray too.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -11,10 +13,12 @@ use chrono::Utc;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::{AppHandle, Emitter};
 
+use crate::codex::{self, CodexStore};
 use crate::tray;
 use crate::usage::{self, UsageData, UsageStore};
 
 pub const USAGE_EVENT: &str = "token-updated";
+pub const CODEX_EVENT: &str = "codex-updated";
 
 /// Claude Code appends several lines per response; coalesce them into one update.
 const DEBOUNCE: Duration = Duration::from_millis(400);
@@ -213,6 +217,84 @@ fn emit(app: &AppHandle, data: &UsageData) {
     tray::push(app, data);
     if let Err(err) = app.emit(USAGE_EVENT, data) {
         eprintln!("cc-deskmeter: failed to emit {USAGE_EVENT}: {err}");
+    }
+}
+
+/// Codex's counterpart of `spawn`: the same debounce and tick over the
+/// `sessions` and `archived_sessions` folders. Its rollouts are append-only
+/// or compressed once, so no background audit is needed.
+pub fn spawn_codex(app: AppHandle, store: Arc<Mutex<CodexStore>>) {
+    let spawned = std::thread::Builder::new()
+        .name("codex-watcher".into())
+        .spawn(move || run_codex(&app, &store));
+    if let Err(err) = spawned {
+        eprintln!("cc-deskmeter: failed to start Codex watcher: {err}");
+    }
+}
+
+fn run_codex(app: &AppHandle, store: &Mutex<CodexStore>) {
+    let roots = codex::lock(store).roots();
+    let (tx, rx) = mpsc::channel::<NotifyResult>();
+    let mut watchers: Vec<Option<RecommendedWatcher>> = roots.iter().map(|_| None).collect();
+    let mut last_generation = None;
+
+    publish_codex(app, store, &mut last_generation, true, &HashSet::new());
+    let mut next_tick = Instant::now() + TICK;
+    loop {
+        for (root, watcher) in roots.iter().zip(&mut watchers) {
+            if watcher.is_none() {
+                *watcher = start_watcher(root, tx.clone());
+            }
+        }
+        let Ok(update) = wait_for_update(&rx, &mut next_tick, TICK, DEBOUNCE) else {
+            return;
+        };
+        if update.relevant || update.force {
+            publish_codex(
+                app,
+                store,
+                &mut last_generation,
+                update.force,
+                &update.paths,
+            );
+        }
+        for (root, watcher) in roots.iter().zip(&mut watchers) {
+            if !root.is_dir() {
+                *watcher = None;
+            }
+        }
+    }
+}
+
+/// Refreshes the Codex store and emits its snapshot if anything changed
+/// since the last emit, or unconditionally when `force` is set (the tick
+/// keeps "today" and the windows' resets current). As for Claude, the full
+/// refresh of every tick picks up an edited `pricing.json` and reprices.
+fn publish_codex(
+    app: &AppHandle,
+    store: &Mutex<CodexStore>,
+    last_generation: &mut Option<u64>,
+    force: bool,
+    paths: &HashSet<PathBuf>,
+) {
+    let data = {
+        let mut store = codex::lock(store);
+        if !paths.is_empty() {
+            store.refresh_paths(paths);
+        }
+        if force || paths.is_empty() {
+            store.refresh();
+        }
+        let generation = store.generation();
+        if !force && *last_generation == Some(generation) {
+            return;
+        }
+        *last_generation = Some(generation);
+        store.snapshot(Utc::now())
+    };
+    tray::push_codex(app, &data);
+    if let Err(err) = app.emit(CODEX_EVENT, &data) {
+        eprintln!("cc-deskmeter: failed to emit {CODEX_EVENT}: {err}");
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "cc-deskmeter"
-version = "0.5.0"
+version = "0.5.5"
 description = "Real-time token, cost and weekly-limit HUD for Claude Code Desktop. 100% offline."
 authors = ["cc-deskmeter"]
 edition = "2024"
@@ -27,7 +27,13 @@ notify = "8"
 dirs = "7"
 walkdir = "2"
 crc32fast = "1"
+# The email in Codex's `id_token` claims names each account (`codex/signin.rs`).
+base64 = "0.22"
 sha2 = "0.10"
+# Codex compresses older rollouts to `.jsonl.zst`; a pure-Rust decoder keeps
+# the cross-compiled macOS and Linux builds free of a C toolchain.
+ruzstd = "0.9"
+memchr = "2"
 
 # A second launch shows the running app instead of starting another (`lib.rs`).
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]

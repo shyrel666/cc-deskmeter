@@ -1,8 +1,9 @@
 //! The tray icon (a menu-bar item on macOS) keeps the live numbers one glance
 //! away while the window is minimised or behind others: a tooltip on Windows,
 //! a title beside the icon on macOS (and on Linux, where the indicator shows
-//! one), and the same figures at the top of its menu, which on Windows is a
-//! panel drawn by the frontend (`tray_panel.rs`).
+//! one), and the same figures at the top of its menu. Once ChatGPT has
+//! sessions, the tooltip and the menu give it a line beside Claude's. On
+//! Windows the menu is a panel drawn by the frontend (`tray_panel.rs`).
 
 use std::fs;
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ use tauri::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 
+use crate::codex::CodexData;
 use crate::tray_panel;
 use crate::usage::UsageData;
 
@@ -35,6 +37,7 @@ pub struct Tray(Sender<Msg>);
 
 pub enum Msg {
     Data(Summary),
+    Codex(CodexSummary),
     Lang(Lang),
     Title(TitleMode),
 }
@@ -55,6 +58,13 @@ impl Tray {
 pub fn push(app: &AppHandle, data: &UsageData) {
     if let Some(tray) = app.try_state::<Tray>() {
         tray.send(Msg::Data(Summary::new(data)));
+    }
+}
+
+/// Hands a fresh ChatGPT snapshot to the tray.
+pub fn push_codex(app: &AppHandle, data: &CodexData) {
+    if let Some(tray) = app.try_state::<Tray>() {
+        tray.send(Msg::Codex(CodexSummary::new(data)));
     }
 }
 
@@ -230,11 +240,94 @@ impl Summary {
     }
 }
 
-/// Commands and watcher threads can publish out of order after releasing the store lock.
-fn accept_summary(current: &mut Option<Summary>, incoming: Summary) {
+/// The few figures of a ChatGPT snapshot the tray shows: the limits of the
+/// account signed in now, and today's tokens.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexSummary {
+    snapshot_id: u64,
+    /// Whether any session was read: without one the tray leaves ChatGPT out.
+    sessions: bool,
+    five_hour: Option<WindowSummary>,
+    weekly: Option<WindowSummary>,
+    today_tokens: u64,
+}
+
+/// One official window as last read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WindowSummary {
+    /// Percent.
+    used: f64,
+    resets_at: Option<DateTime<Utc>>,
+}
+
+impl WindowSummary {
+    /// When it resets, while it is still open at `now`.
+    fn open_until(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.resets_at.filter(|at| *at > now)
+    }
+
+    /// Percent used at `now`: none once its reset has passed, as the next snapshot will say.
+    fn used_at(&self, now: DateTime<Utc>) -> f64 {
+        if self.resets_at.is_some_and(|at| at <= now) {
+            0.0
+        } else {
+            self.used
+        }
+    }
+}
+
+impl CodexSummary {
+    fn new(data: &CodexData) -> Self {
+        let current = data.current.as_ref();
+        Self {
+            snapshot_id: data.snapshot_id,
+            sessions: data.file_count > 0,
+            five_hour: current
+                .and_then(|current| current.five_hour.as_ref())
+                .map(|window| WindowSummary {
+                    used: window.used_percent,
+                    resets_at: window.resets_at,
+                }),
+            weekly: current
+                .and_then(|current| current.weekly.as_ref())
+                .map(|window| WindowSummary {
+                    used: window.used_percent,
+                    resets_at: window.resets_at,
+                }),
+            today_tokens: data.today.usage.tokens.total(),
+        }
+    }
+
+    /// When its 5-hour window resets, while the tray shows it and it is open at `now`.
+    fn shown_reset(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.five_hour
+            .filter(|_| self.sessions)
+            .and_then(|window| window.open_until(now))
+    }
+}
+
+/// A snapshot in its store's order: commands and watcher threads can publish
+/// out of order after releasing the store lock.
+trait Ordered {
+    fn snapshot_id(&self) -> u64;
+}
+
+impl Ordered for Summary {
+    fn snapshot_id(&self) -> u64 {
+        self.snapshot_id
+    }
+}
+
+impl Ordered for CodexSummary {
+    fn snapshot_id(&self) -> u64 {
+        self.snapshot_id
+    }
+}
+
+fn accept_summary<T: Ordered>(current: &mut Option<T>, incoming: T) {
     if current
         .as_ref()
-        .is_none_or(|old| incoming.snapshot_id > old.snapshot_id)
+        .is_none_or(|old| incoming.snapshot_id() > old.snapshot_id())
     {
         *current = Some(incoming);
     }
@@ -249,8 +342,13 @@ struct View {
 }
 
 impl View {
-    fn new(summary: Option<&Summary>, now: DateTime<Utc>, settings: Settings) -> Self {
-        let rows = rows(summary, now, settings.lang);
+    fn new(
+        summary: Option<&Summary>,
+        codex: Option<&CodexSummary>,
+        now: DateTime<Utc>,
+        settings: Settings,
+    ) -> Self {
+        let rows = rows(summary, codex, now, settings.lang);
         Self {
             title: summary
                 .map(|summary| title(summary, now, settings))
@@ -275,11 +373,101 @@ fn title(summary: &Summary, now: DateTime<Utc>, settings: Settings) -> String {
 }
 
 /// Status lines, most important first: the tooltip drops from the end when
-/// they do not fit.
-fn rows(summary: Option<&Summary>, now: DateTime<Utc>, lang: Lang) -> Vec<String> {
+/// they do not fit. Claude's alone, or both tools' once ChatGPT has sessions.
+fn rows(
+    summary: Option<&Summary>,
+    codex: Option<&CodexSummary>,
+    now: DateTime<Utc>,
+    lang: Lang,
+) -> Vec<String> {
     let Some(summary) = summary else {
         return vec![text(lang).loading.to_owned()];
     };
+    match codex.filter(|codex| codex.sessions) {
+        Some(codex) => both_rows(summary, codex, now, lang),
+        None => claude_rows(summary, now, lang),
+    }
+}
+
+/// A tool's 5-hour window, as its line tells it.
+enum Window {
+    /// Its reset has passed: the next request opens the next one.
+    Idle,
+    /// The share used, when known, and the time to the reset.
+    Open {
+        used: Option<f64>,
+        left: chrono::TimeDelta,
+    },
+}
+
+/// Each tool a line, then both tools' tokens today: Claude's own lines would
+/// leave ChatGPT no room in the tooltip's 127 characters.
+fn both_rows(
+    summary: &Summary,
+    codex: &CodexSummary,
+    now: DateTime<Utc>,
+    lang: Lang,
+) -> Vec<String> {
+    let claude = match summary.open_block(now) {
+        // The 5-hour estimate means nothing once its window has ended.
+        Some(block) => Window::Open {
+            used: summary.quota,
+            left: block.end - now,
+        },
+        None => Window::Idle,
+    };
+    let chatgpt = codex.five_hour.map(|window| match window.open_until(now) {
+        Some(end) => Window::Open {
+            used: Some(window.used),
+            left: end - now,
+        },
+        None => Window::Idle,
+    });
+    let weekly = codex.weekly.map(|window| window.used_at(now));
+    let today = format!(
+        "{} Claude {} · ChatGPT {}",
+        text(lang).today,
+        tokens(summary.today_tokens as f64),
+        tokens(codex.today_tokens as f64)
+    );
+    tool_line("Claude", Some(claude), summary.weekly, lang)
+        .into_iter()
+        .chain(tool_line("ChatGPT", chatgpt, weekly, lang))
+        .chain([today])
+        .collect()
+}
+
+/// One tool's line: its 5-hour share and the time to that window's reset (or
+/// that none is open), then its weekly share. `None` with nothing to tell.
+fn tool_line(
+    name: &str,
+    window: Option<Window>,
+    weekly: Option<f64>,
+    lang: Lang,
+) -> Option<String> {
+    let mut parts = Vec::with_capacity(3);
+    match window {
+        Some(Window::Open { used, left }) => {
+            if let Some(used) = used {
+                parts.push(format!("5h {}", percent(used)));
+            }
+            let left = countdown(left, lang);
+            parts.push(match lang {
+                Lang::En => format!("{left} left"),
+                Lang::Zh => format!("{left}后重置"),
+            });
+        }
+        Some(Window::Idle) => parts.push(text(lang).window_idle.to_owned()),
+        None => {}
+    }
+    if let Some(weekly) = weekly {
+        parts.push(format!("{} {}", text(lang).week, percent(weekly)));
+    }
+    (!parts.is_empty()).then(|| format!("{name} {}", parts.join(" · ")))
+}
+
+/// Claude's alone: the reset, the quota estimates, the burn rate and today.
+fn claude_rows(summary: &Summary, now: DateTime<Utc>, lang: Lang) -> Vec<String> {
     let block = summary.open_block(now);
     let mut rows = Vec::with_capacity(4);
     rows.push(match block {
@@ -370,6 +558,10 @@ fn truncate_utf16(text: String, max: usize) -> String {
 struct Text {
     loading: &'static str,
     no_block: &'static str,
+    /// A tool's 5-hour window, between its reset and the next request.
+    window_idle: &'static str,
+    /// Before a tool's weekly share.
+    week: &'static str,
     burn_rate: &'static str,
     today: &'static str,
     unpriced: &'static str,
@@ -383,6 +575,8 @@ fn text(lang: Lang) -> &'static Text {
         Lang::En => &Text {
             loading: "Scanning transcripts…",
             no_block: "No active 5-hour window",
+            window_idle: "5h idle",
+            week: "week",
             burn_rate: "Burn rate",
             today: "Today",
             unpriced: "unpriced",
@@ -393,6 +587,8 @@ fn text(lang: Lang) -> &'static Text {
         Lang::Zh => &Text {
             loading: "正在扫描对话日志…",
             no_block: "当前没有进行中的 5 小时窗口",
+            window_idle: "5h 空闲",
+            week: "本周",
             burn_rate: "燃烧速率",
             today: "今日",
             unpriced: "未定价",
@@ -489,14 +685,24 @@ fn cost(value: f64, unpriced: u64) -> Option<String> {
     }
 }
 
-/// When the countdown shows its next minute; data arrives on its own.
-fn next_change(summary: Option<&Summary>, now: DateTime<Utc>) -> Duration {
-    let Some(block) = summary.and_then(|summary| summary.open_block(now)) else {
-        return MAX_WAIT;
-    };
-    let left_ms = (block.end - now).num_milliseconds();
-    let wait = (left_ms % 60_000 + MINUTE_SLACK_MS) as u64;
-    Duration::from_millis(wait).min(MAX_WAIT)
+/// When a countdown shows its next minute; data arrives on its own.
+fn next_change(
+    summary: Option<&Summary>,
+    codex: Option<&CodexSummary>,
+    now: DateTime<Utc>,
+) -> Duration {
+    let claude = summary
+        .and_then(|summary| summary.open_block(now))
+        .map(|block| block.end);
+    let chatgpt = codex.and_then(|codex| codex.shown_reset(now));
+    claude
+        .into_iter()
+        .chain(chatgpt)
+        .map(|end| {
+            let left_ms = (end - now).num_milliseconds();
+            Duration::from_millis((left_ms % 60_000 + MINUTE_SLACK_MS) as u64)
+        })
+        .fold(MAX_WAIT, Duration::min)
 }
 
 /// Creates the tray icon and starts the thread that keeps it current.
@@ -513,7 +719,7 @@ pub fn spawn(app: &AppHandle, rx: Receiver<Msg>) -> tauri::Result<()> {
         .and_then(|path| fs::read_to_string(path).ok())
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default();
-    let mut view = View::new(None, Utc::now(), settings);
+    let mut view = View::new(None, None, Utc::now(), settings);
     // Without its panel, Windows falls back to the native menu.
     let panel = cfg!(windows)
         && tray_panel::create(app)
@@ -584,6 +790,7 @@ pub fn spawn(app: &AppHandle, rx: Receiver<Msg>) -> tauri::Result<()> {
         settings,
         settings_path,
         summary: None,
+        codex: None,
         shown: view,
         recheck: false,
     };
@@ -676,6 +883,7 @@ struct Painter {
     settings: Settings,
     settings_path: Option<PathBuf>,
     summary: Option<Summary>,
+    codex: Option<CodexSummary>,
     shown: View,
     /// A menu click toggled a check item on its own; set them all again.
     recheck: bool,
@@ -687,7 +895,8 @@ impl Painter {
             if let Err(err) = self.paint(Utc::now()) {
                 eprintln!("cc-deskmeter: failed to update the tray: {err}");
             }
-            match rx.recv_timeout(next_change(self.summary.as_ref(), Utc::now())) {
+            let wait = next_change(self.summary.as_ref(), self.codex.as_ref(), Utc::now());
+            match rx.recv_timeout(wait) {
                 Ok(msg) => {
                     self.apply(msg);
                     // Catch up on a burst at once, painting only its result.
@@ -704,6 +913,7 @@ impl Painter {
     fn apply(&mut self, msg: Msg) {
         match msg {
             Msg::Data(summary) => accept_summary(&mut self.summary, summary),
+            Msg::Codex(codex) => accept_summary(&mut self.codex, codex),
             Msg::Lang(lang) => self.change(Settings {
                 lang,
                 ..self.settings
@@ -740,7 +950,12 @@ impl Painter {
     }
 
     fn paint(&mut self, now: DateTime<Utc>) -> tauri::Result<()> {
-        let view = View::new(self.summary.as_ref(), now, self.settings);
+        let view = View::new(
+            self.summary.as_ref(),
+            self.codex.as_ref(),
+            now,
+            self.settings,
+        );
         if view.title != self.shown.title {
             self.tray
                 .set_title((!view.title.is_empty()).then_some(&view.title))?;
@@ -798,6 +1013,22 @@ mod tests {
         }
     }
 
+    fn chatgpt(left_seconds: i64) -> CodexSummary {
+        CodexSummary {
+            snapshot_id: 1,
+            sessions: true,
+            five_hour: Some(WindowSummary {
+                used: 23.4,
+                resets_at: Some(now() + chrono::TimeDelta::seconds(left_seconds)),
+            }),
+            weekly: Some(WindowSummary {
+                used: 48.0,
+                resets_at: Some(now() + chrono::TimeDelta::days(3)),
+            }),
+            today_tokens: 12_400_000,
+        }
+    }
+
     fn settings(lang: Lang, title: TitleMode) -> Settings {
         Settings { lang, title }
     }
@@ -815,7 +1046,7 @@ mod tests {
         accept_summary(&mut current, duplicate);
         assert_eq!(current.as_ref(), Some(&newer));
         assert!(
-            rows(current.as_ref(), now(), Lang::En)
+            rows(current.as_ref(), None, now(), Lang::En)
                 .last()
                 .unwrap()
                 .starts_with("Today 42 ")
@@ -829,7 +1060,7 @@ mod tests {
         accept_summary(&mut current, corrected.clone());
         assert_eq!(current.as_ref(), Some(&corrected));
         assert_eq!(
-            rows(current.as_ref(), now(), Lang::En)[0],
+            rows(current.as_ref(), None, now(), Lang::En)[0],
             "No active 5-hour window"
         );
     }
@@ -871,7 +1102,7 @@ mod tests {
 
     #[test]
     fn rows_cover_countdown_quota_burn_rate_and_today() {
-        let rows = rows(Some(&summary(3600)), now(), Lang::En);
+        let rows = rows(Some(&summary(3600)), None, now(), Lang::En);
         assert_eq!(rows.len(), 4);
         assert!(rows[0].starts_with("Resets in 1h 00m ("), "{}", rows[0]);
         assert_eq!(rows[1], "Est. quota 73% · Weekly 42%");
@@ -879,7 +1110,7 @@ mod tests {
         assert_eq!(rows[3], "Today 1.23M · $1,234.50");
 
         // Without an open block only the weekly figure and today remain.
-        let rows = super::rows(Some(&summary(-1)), now(), Lang::Zh);
+        let rows = super::rows(Some(&summary(-1)), None, now(), Lang::Zh);
         assert_eq!(
             rows,
             [
@@ -891,12 +1122,90 @@ mod tests {
     }
 
     #[test]
+    fn chatgpt_gets_a_line_beside_claude_once_it_has_sessions() {
+        let claude = summary(4 * 3600 + 27 * 60 + 30);
+        let codex = chatgpt(2 * 3600 + 5 * 60 + 10);
+        assert_eq!(
+            rows(Some(&claude), Some(&codex), now(), Lang::Zh),
+            [
+                "Claude 5h 73% · 4小时27分后重置 · 本周 42%",
+                "ChatGPT 5h 23% · 2小时05分后重置 · 本周 48%",
+                "今日 Claude 1.23M · ChatGPT 12.4M",
+            ]
+        );
+        assert_eq!(
+            rows(Some(&claude), Some(&codex), now(), Lang::En),
+            [
+                "Claude 5h 73% · 4h 27m left · week 42%",
+                "ChatGPT 5h 23% · 2h 05m left · week 48%",
+                "Today Claude 1.23M · ChatGPT 12.4M",
+            ]
+        );
+        // Without sessions ChatGPT is left out, and Claude keeps its own lines.
+        let unused = CodexSummary {
+            sessions: false,
+            ..codex
+        };
+        assert_eq!(
+            rows(Some(&claude), Some(&unused), now(), Lang::En),
+            rows(Some(&claude), None, now(), Lang::En)
+        );
+    }
+
+    #[test]
+    fn lines_say_when_a_window_is_idle_or_unread() {
+        // Both 5-hour resets have passed since the snapshots, ChatGPT's weekly one too.
+        let ended = summary(-1);
+        let mut codex = chatgpt(-1);
+        codex.weekly.as_mut().unwrap().resets_at = Some(now());
+        assert_eq!(
+            rows(Some(&ended), Some(&codex), now(), Lang::Zh)[..2],
+            ["Claude 5h 空闲 · 本周 42%", "ChatGPT 5h 空闲 · 本周 0%"]
+        );
+        // Without Claude Desktop's record Claude has no 5-hour share; before
+        // any reading ChatGPT keeps only its part of today.
+        let mut unestimated = summary(45 * 60);
+        unestimated.quota = None;
+        unestimated.weekly = None;
+        codex.five_hour = None;
+        codex.weekly = None;
+        assert_eq!(
+            rows(Some(&unestimated), Some(&codex), now(), Lang::En),
+            ["Claude 45m left", "Today Claude 1.23M · ChatGPT 12.4M"]
+        );
+    }
+
+    #[test]
+    fn both_tools_fit_the_windows_tooltip() {
+        let claude = summary(4 * 3600 + 59 * 60);
+        let codex = chatgpt(4 * 3600 + 59 * 60);
+        for lang in [Lang::En, Lang::Zh] {
+            let tip = tooltip(&rows(Some(&claude), Some(&codex), now(), lang));
+            assert!(tip.encode_utf16().count() <= TOOLTIP_MAX, "{tip}");
+            assert_eq!(tip.lines().count(), 4, "{tip}");
+        }
+        // With every share at 100%, today's tokens are the first to go.
+        let mut full = claude.clone();
+        full.quota = Some(100.0);
+        full.weekly = Some(100.0);
+        let mut maxed = codex.clone();
+        maxed.five_hour.as_mut().unwrap().used = 100.0;
+        maxed.weekly.as_mut().unwrap().used = 100.0;
+        let tip = tooltip(&rows(Some(&full), Some(&maxed), now(), Lang::En));
+        assert!(tip.encode_utf16().count() <= TOOLTIP_MAX, "{tip}");
+        assert!(
+            tip.lines().last().unwrap().starts_with("ChatGPT 5h 100%"),
+            "{tip}"
+        );
+    }
+
+    #[test]
     fn tooltip_fits_the_windows_limit() {
         let mut data = summary(4 * 3600);
         data.today_unpriced = 3;
         data.block.as_mut().unwrap().cost_per_hour = 123.45;
         for lang in [Lang::En, Lang::Zh] {
-            let rows = rows(Some(&data), now(), lang);
+            let rows = rows(Some(&data), None, now(), lang);
             let tip = tooltip(&rows);
             assert!(tip.encode_utf16().count() <= TOOLTIP_MAX, "{tip}");
             assert_eq!(tip.lines().count(), 5, "{tip}");
@@ -922,14 +1231,29 @@ mod tests {
     }
 
     #[test]
-    fn wakes_when_the_countdown_moves_to_its_next_minute() {
+    fn wakes_when_a_countdown_moves_to_its_next_minute() {
         let data = summary(3600 + 15);
         assert_eq!(
-            next_change(Some(&data), now()),
+            next_change(Some(&data), None, now()),
             Duration::from_millis(15_000 + MINUTE_SLACK_MS as u64)
         );
-        assert_eq!(next_change(Some(&summary(-5)), now()), MAX_WAIT);
-        assert_eq!(next_change(None, now()), MAX_WAIT);
+        assert_eq!(next_change(Some(&summary(-5)), None, now()), MAX_WAIT);
+        assert_eq!(next_change(None, None, now()), MAX_WAIT);
+
+        // ChatGPT's countdown too, while the tray shows it.
+        let codex = chatgpt(1800 + 5);
+        assert_eq!(
+            next_change(Some(&data), Some(&codex), now()),
+            Duration::from_millis(5_000 + MINUTE_SLACK_MS as u64)
+        );
+        let unused = CodexSummary {
+            sessions: false,
+            ..codex
+        };
+        assert_eq!(
+            next_change(Some(&data), Some(&unused), now()),
+            Duration::from_millis(15_000 + MINUTE_SLACK_MS as u64)
+        );
     }
 
     #[test]

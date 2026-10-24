@@ -1,14 +1,19 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AlertTriangle, Check, Copy, Download, FolderOpen, ShieldCheck } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
+import { makeCodexDemoHistory } from "../codex/demo";
+import { CODEX_PALETTES } from "../codex/palette";
+import { renderCodexShareCard } from "../codex/shareCard";
+import { dayOf, type CodexData, type CodexHistory } from "../codex/types";
 import { useI18n } from "../i18n/I18nProvider";
 import type { Lang } from "../i18n/messages";
 import { cn } from "../lib/cn";
 import { makeDemoHistory } from "../lib/demo";
 import { CARD_HEIGHT, CARD_WIDTH, canvasToPng, renderShareCard } from "../lib/shareCard";
 import { useTheme } from "../theme/ThemeProvider";
+import type { ThemeDefinition } from "../theme/themes";
 import type { ArchiveSummary, UsageData } from "../types";
 import { Button } from "./ui/Button";
 import { Dialog, DialogClose, DialogTitle } from "./ui/Dialog";
@@ -32,32 +37,87 @@ function fileName() {
 }
 
 /**
- * Previews the share card and exports it as a PNG (clipboard or file). The
- * stats are frozen when the dialog opens; switching theme (T) or language
- * re-renders the card. Its records and activity heatmap span every day,
- * which only the archive summary carries (a snapshot has the recent ones).
+ * Claude's card, from the snapshot as the dialog opens. Its records and
+ * activity heatmap span every day, which only the archive summary carries
+ * (a snapshot has the recent ones).
  */
 export function ShareDialog({ data, todayKey, onClose }: { data: UsageData; todayKey: string; onClose: () => void }) {
+  const { t } = useI18n();
+  const [opened] = useState(data);
+  const load = useCallback(async (): Promise<UsageData> => {
+    if (!isTauri()) return { ...opened, daily: makeDemoHistory(new Date(opened.generatedAt)) };
+    try {
+      const summary = await invoke<ArchiveSummary>("get_archive_summary");
+      return { ...opened, daily: summary.daily };
+    } catch (err) {
+      // The recent days still make a card.
+      console.error(err);
+      return opened;
+    }
+  }, [opened]);
+  const draw = useCallback(
+    (snapshot: UsageData, theme: ThemeDefinition, lang: Lang) => renderShareCard({ data: snapshot, theme, lang, todayKey }),
+    [todayKey],
+  );
+  return <CardDialog load={load} draw={draw} privacy={t.share.privacy} alt={t.share.alt} onClose={onClose} />;
+}
+
+/**
+ * Codex's card. Every day and all time's models and efforts come from the
+ * rollouts, read once as the dialog opens; should that fail, the snapshot's
+ * recent days and last week stand in.
+ */
+export function CodexShareDialog({ data, onClose }: { data: CodexData; onClose: () => void }) {
+  const { t } = useI18n();
+  const [opened] = useState(data);
+  const load = useCallback(async (): Promise<CodexHistory> => {
+    if (!isTauri()) return makeCodexDemoHistory(new Date(opened.generatedAt));
+    try {
+      return await invoke<CodexHistory>("get_codex_history");
+    } catch (err) {
+      console.error(err);
+      const { generatedAt, daily, models, efforts, total } = opened;
+      return { generatedAt, daily: daily.map(dayOf), models, efforts, total };
+    }
+  }, [opened]);
+  const incomplete = opened.readErrors.length > 0;
+  const draw = useCallback(
+    (history: CodexHistory, theme: ThemeDefinition, lang: Lang) =>
+      renderCodexShareCard({ history, theme, palette: CODEX_PALETTES[theme.id], lang, incomplete }),
+    [incomplete],
+  );
+  return <CardDialog load={load} draw={draw} privacy={t.share.codexPrivacy} alt={t.share.codexAlt} onClose={onClose} />;
+}
+
+interface CardDialogProps<T> {
+  /** What the card shows, fetched once. */
+  load: () => Promise<T>;
+  draw: (stats: T, theme: ThemeDefinition, lang: Lang) => Promise<HTMLCanvasElement>;
+  privacy: string;
+  alt: string;
+  onClose: () => void;
+}
+
+/**
+ * Previews a share card and exports it as a PNG (clipboard or file). The
+ * stats are frozen when the dialog opens; switching theme (T) or language
+ * re-renders the card.
+ */
+function CardDialog<T>({ load, draw, privacy, alt, onClose }: CardDialogProps<T>) {
   const { theme } = useTheme();
   const { t, lang: appLang } = useI18n();
-  const [opened] = useState(data);
-  const [snapshot, setSnapshot] = useState<UsageData | null>(() =>
-    isTauri() ? null : { ...opened, daily: makeDemoHistory(new Date(opened.generatedAt)) },
-  );
+  const [stats, setStats] = useState<{ value: T } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   useEffect(() => {
-    if (!isTauri()) return;
     let live = true;
-    invoke<ArchiveSummary>("get_archive_summary")
-      .then((summary) => live && setSnapshot({ ...opened, daily: summary.daily }))
-      .catch((err: unknown) => {
-        // The recent days still make a card.
-        console.error(err);
-        if (live) setSnapshot(opened);
-      });
+    load().then(
+      (value) => live && setStats({ value }),
+      (err: unknown) => live && setLoadError(errorText(err)),
+    );
     return () => {
       live = false;
     };
-  }, [opened]);
+  }, [load]);
   // Starts in the app's language; switching it here changes only the card.
   const [lang, setLang] = useState<Lang>(appLang);
   const [card, setCard] = useState<{ blob: Blob; url: string } | null>(null);
@@ -66,10 +126,10 @@ export function ShareDialog({ data, todayKey, onClose }: { data: UsageData; toda
   const [notice, setNotice] = useState<Notice>(null);
 
   useEffect(() => {
-    if (!snapshot) return;
+    if (!stats) return;
     let cancelled = false;
     setRendering(true);
-    renderShareCard({ data: snapshot, theme, lang, todayKey })
+    draw(stats.value, theme, lang)
       .then(canvasToPng)
       .then((blob) => {
         if (!cancelled) setCard({ blob, url: URL.createObjectURL(blob) });
@@ -83,7 +143,8 @@ export function ShareDialog({ data, todayKey, onClose }: { data: UsageData; toda
     return () => {
       cancelled = true;
     };
-  }, [snapshot, theme, lang, todayKey, t]);
+  }, [stats, draw, theme, lang, t]);
+  const shown: Notice = notice ?? (loadError ? { tone: "error", text: t.share.renderError(loadError) } : null);
 
   // The preview keeps showing (and Save keeps using) a card until the next one replaces it.
   useEffect(() => {
@@ -139,7 +200,7 @@ export function ShareDialog({ data, todayKey, onClose }: { data: UsageData; toda
           <DialogTitle id="share-title">{t.share.title}</DialogTitle>
           <p className="mt-1 flex items-center gap-1.5 text-[12px] text-ink-3">
             <ShieldCheck className="size-3.5 shrink-0" strokeWidth={1.75} aria-hidden />
-            {t.share.privacy}
+            {privacy}
           </p>
         </div>
         <DialogClose label={t.common.close} onClick={onClose} />
@@ -152,13 +213,13 @@ export function ShareDialog({ data, todayKey, onClose }: { data: UsageData; toda
         {card ? (
           <img
             src={card.url}
-            alt={t.share.alt}
+            alt={alt}
             className={cn("block size-full transition-opacity duration-200", rendering && "opacity-60")}
             draggable={false}
           />
         ) : (
           <div className="grid size-full place-items-center">
-            <span className="pulse-dot" data-busy="true" />
+            {!loadError && <span className="pulse-dot" data-busy="true" />}
           </div>
         )}
       </div>
@@ -180,34 +241,34 @@ export function ShareDialog({ data, todayKey, onClose }: { data: UsageData; toda
         </div>
       </div>
 
-      {notice && (
+      {shown && (
         <p
           role="status"
           className={cn(
             "mt-3 flex min-w-0 items-center gap-2 text-[12px]",
-            notice.tone === "ok" ? "text-ink-2" : "text-danger",
+            shown.tone === "ok" ? "text-ink-2" : "text-danger",
           )}
         >
-          {notice.tone === "ok" ? (
+          {shown.tone === "ok" ? (
             <Check className="size-3.5 shrink-0 text-good" strokeWidth={2} aria-hidden />
           ) : (
             <AlertTriangle className="size-3.5 shrink-0" strokeWidth={2} aria-hidden />
           )}
           <span className="min-w-0 truncate">
-            {notice.text}
-            {notice.path && (
+            {shown.text}
+            {shown.path && (
               <>
                 {" "}
-                <span className="font-mono text-ink" title={notice.path}>
-                  {notice.path}
+                <span className="font-mono text-ink" title={shown.path}>
+                  {shown.path}
                 </span>
               </>
             )}
           </span>
-          {notice.path && (
+          {shown.path && (
             <button
               type="button"
-              onClick={() => void revealItemInDir(notice.path!).catch((err: unknown) => setNotice({ tone: "error", text: errorText(err) }))}
+              onClick={() => void revealItemInDir(shown.path!).catch((err: unknown) => setNotice({ tone: "error", text: errorText(err) }))}
               className="ml-auto flex shrink-0 items-center gap-1 text-accent hover:underline"
             >
               <FolderOpen className="size-3.5" strokeWidth={1.75} aria-hidden />

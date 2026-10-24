@@ -30,9 +30,32 @@ interface HeaderProps {
   onAbout: () => void;
   onArchive: () => void;
   revision: number;
+  /** Hover tooltip on the status badge, overriding Claude's folder and transcript count. */
+  detail?: string;
+  /** The Claude · Codex switch, shown in place of the tagline. */
+  switcher?: ReactNode;
+  /** Replaces the 5-hour block capsule (the Codex view's limits). */
+  capsule?: ReactNode;
+  /** Whether the tool shown has usage for a share card. */
+  canShare: boolean;
+  /** The archive keeps Claude's history, which Claude Code deletes; Codex keeps its rollouts, so its view has none. */
+  showArchive?: boolean;
 }
 
-export function Header({ data, status, onShare, onMiniMode, onAbout, onArchive, revision }: HeaderProps) {
+export function Header({
+  data,
+  status,
+  onShare,
+  onMiniMode,
+  onAbout,
+  onArchive,
+  revision,
+  detail,
+  switcher,
+  capsule,
+  canShare,
+  showArchive = true,
+}: HeaderProps) {
   const { t, toggleLang } = useI18n();
   return (
     // First in the entrance cascade (slot 0).
@@ -46,30 +69,28 @@ export function Header({ data, status, onShare, onMiniMode, onAbout, onArchive, 
             "xl:grid-cols-[minmax(max-content,1fr)_minmax(0,600px)_minmax(max-content,1fr)] glass:px-4",
           )}
         >
-          <Brand data={data} status={status} revision={revision} onAbout={onAbout} />
-          <BlockCapsule
-            block={data?.activeBlock ?? null}
-            peak={data?.peakBlock ?? null}
-            quota={data?.quota ?? null}
-            className="order-last col-span-2 xl:order-none xl:col-span-1"
-          />
+          <Brand data={data} status={status} revision={revision} detail={detail} onAbout={onAbout} switcher={switcher} />
+          {capsule ?? (
+            <BlockCapsule
+              block={data?.activeBlock ?? null}
+              peak={data?.peakBlock ?? null}
+              quota={data?.quota ?? null}
+              className="order-last col-span-2 xl:order-none xl:col-span-1"
+            />
+          )}
           <div className="flex items-center justify-self-end gap-2">
             <ThemeSwitcher />
             <HeaderButton label={t.header.langLabel} hint={t.header.langHint} shortcut="L" onClick={toggleLang}>
               <Languages className="size-4" strokeWidth={1.75} aria-hidden />
             </HeaderButton>
-            <HeaderButton label={t.header.shareLabel} hint={t.header.shareHint} onClick={onShare} disabled={!data}>
+            <HeaderButton label={t.header.shareLabel} hint={t.header.shareHint} onClick={onShare} disabled={!canShare}>
               <Share2 className="size-4" strokeWidth={1.75} aria-hidden />
             </HeaderButton>
-            <HeaderButton
-              label={t.header.archiveLabel}
-              hint={t.header.archiveHint}
-              shortcut="A"
-              onClick={onArchive}
-              disabled={!data}
-            >
-              <Archive className="size-4" strokeWidth={1.75} aria-hidden />
-            </HeaderButton>
+            {showArchive && (
+              <HeaderButton label={t.header.archiveLabel} hint={t.header.archiveHint} shortcut="A" onClick={onArchive} disabled={!data}>
+                <Archive className="size-4" strokeWidth={1.75} aria-hidden />
+              </HeaderButton>
+            )}
             <HeaderButton label={t.header.miniLabel} hint={t.header.miniHint} shortcut="M" onClick={onMiniMode}>
               <PictureInPicture2 className="size-4" strokeWidth={1.75} aria-hidden />
             </HeaderButton>
@@ -95,13 +116,17 @@ interface BrandProps {
   data: UsageData | null;
   status: FeedStatus;
   revision: number;
+  /** Hover tooltip on the status badge, overriding Claude's folder and transcript count. */
+  detail?: string;
   onAbout: () => void;
+  switcher?: ReactNode;
 }
 
-function Brand({ data, status, revision, onAbout }: BrandProps) {
+function Brand({ data, status, revision, detail, onAbout, switcher }: BrandProps) {
   const { t } = useI18n();
   // The watched folder and transcript count stay off screen; hover reveals them.
-  const detail = data ? t.header.transcripts(displayDataDirs(data.dataDirs), formatInteger(data.fileCount)) : undefined;
+  const title =
+    detail ?? (data ? t.header.transcripts(displayDataDirs(data.dataDirs), formatInteger(data.fileCount)) : undefined);
   return (
     <div className="flex min-w-0 items-center gap-3">
       <LogoMark />
@@ -119,7 +144,7 @@ function Brand({ data, status, revision, onAbout }: BrandProps) {
           >
             v{APP_VERSION}
           </button>
-          <span className="flex shrink-0 items-center gap-1.5 text-[11.5px] leading-none text-ink-3" title={detail}>
+          <span className="flex shrink-0 items-center gap-1.5 text-[11.5px] leading-none text-ink-3" title={title}>
             <span
               key={revision}
               className="pulse-dot shrink-0"
@@ -129,8 +154,13 @@ function Brand({ data, status, revision, onAbout }: BrandProps) {
             <span className={cn("pulse-status", status === "live" && "text-ink-2")}>{t.status[status]}</span>
           </span>
         </div>
-        {/* What the app is, short of the About tagline. Room for descenders, which `truncate` would clip. */}
-        <p className="mt-0.5 truncate text-[11.5px] leading-4 text-ink-3">{t.header.tagline}</p>
+        {/* What the app is, short of the About tagline. Room for descenders, which `truncate` would clip.
+            With a second tool to show, the tool switch takes its place. */}
+        {switcher ? (
+          <div className="mt-1">{switcher}</div>
+        ) : (
+          <p className="mt-0.5 truncate text-[11.5px] leading-4 text-ink-3">{t.header.tagline}</p>
+        )}
       </div>
     </div>
   );
@@ -176,7 +206,7 @@ function HeaderButton({ label, hint, shortcut, onClick, disabled, children }: He
 const BLOCK_SECONDS = 5 * 3600;
 /** Marks on the Swiss Industrial dial scale: hours of the block, or quota percent. */
 const BLOCK_MARKS = ["0", "1h", "2h", "3h", "4h", "5h"];
-const QUOTA_MARKS = ["0", "20", "40", "60", "80", "100%"];
+export const QUOTA_MARKS = ["0", "20", "40", "60", "80", "100%"];
 
 /** Fill colour by how close the 5-hour quota is to its limit. */
 export function quotaColor(percent: number): string | undefined {
@@ -259,13 +289,13 @@ function BlockCapsule({ block, peak, quota, className }: BlockCapsuleProps) {
     >
       {/* Content-width columns with the slack shared out, so all three gaps match. */}
       <div className="grid grid-cols-2 gap-x-5 gap-y-1.5 sm:grid-cols-[repeat(4,auto)] sm:justify-between">
-        <Stat label={t.header.activeBlock}>
+        <CapsuleStat label={t.header.activeBlock}>
           <span className="flex items-center gap-1.5 text-[12px] text-ink-2 num">
             <Flame className="size-3.5 text-accent swiss:hidden" strokeWidth={2} aria-hidden />
             {formatClock(start)} → {formatClock(end)}
           </span>
-        </Stat>
-        <Stat label={t.header.usedThisBlock}>
+        </CapsuleStat>
+        <CapsuleStat label={t.header.usedThisBlock}>
           <AnimatedNumber
             className="num num-hero text-[17px] font-semibold leading-none text-ink"
             value={block.usage.totalTokens}
@@ -276,8 +306,8 @@ function BlockCapsule({ block, peak, quota, className }: BlockCapsuleProps) {
             value={block.usage.costUsd}
             format={(cost) => formatCost(cost, block.usage.unpricedMessageCount, t.common.unpriced)}
           />
-        </Stat>
-        <Stat label={t.header.resetsIn}>
+        </CapsuleStat>
+        <CapsuleStat label={t.header.resetsIn}>
           {theme.instrument ? (
             <span className="num num-hero text-[17px] font-semibold leading-none text-ink">
               {pad(hours)}:{pad(minutes)}:{pad(seconds)}
@@ -288,8 +318,8 @@ function BlockCapsule({ block, peak, quota, className }: BlockCapsuleProps) {
               <span className="ml-1 text-[11px] font-normal text-ink-3">{t.time.secondsLeft(pad(seconds))}</span>
             </span>
           )}
-        </Stat>
-        <Stat label={t.header.vsPeak} title={peakHint}>
+        </CapsuleStat>
+        <CapsuleStat label={t.header.vsPeak} title={peakHint}>
           {peak && peakRatio !== null ? (
             <>
               <span
@@ -305,7 +335,7 @@ function BlockCapsule({ block, peak, quota, className }: BlockCapsuleProps) {
           ) : (
             <span className="text-[13px] leading-none text-ink-3">{t.header.firstBlock}</span>
           )}
-        </Stat>
+        </CapsuleStat>
       </div>
       {/* Every theme's meter is centred in the same slot, so the capsule is one height in all of them.
           The tag names what the bar measures, since only the Swiss dial prints a scale: the predicted
@@ -331,7 +361,7 @@ function BlockCapsule({ block, peak, quota, className }: BlockCapsuleProps) {
   );
 }
 
-function Stat({ label, title, children }: { label: string; title?: string; children: ReactNode }) {
+export function CapsuleStat({ label, title, children }: { label: string; title?: string; children: ReactNode }) {
   return (
     <div className="min-w-0" title={title}>
       <div className="pulse-label mb-1 whitespace-nowrap leading-4">{label}</div>

@@ -1,12 +1,12 @@
 {
   "name": "cc-deskmeter",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.5.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "node --import ./tests/register-typescript.mjs --test tests/usageFeed.test.mjs tests/usageStats.test.mjs tests/weekly.test.mjs tests/archive.test.mjs",
+    "test": "node --import ./tests/register-typescript.mjs --test tests/usageFeed.test.mjs tests/usageStats.test.mjs tests/weekly.test.mjs tests/archive.test.mjs tests/codexPace.test.mjs tests/codexAccounts.test.mjs tests/codexShare.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

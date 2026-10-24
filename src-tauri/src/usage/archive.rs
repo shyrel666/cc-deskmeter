@@ -524,6 +524,28 @@ impl Archive {
         entry.readings[from..].iter().map(Reading::sample).collect()
     }
 
+    /// When every account's readings of the last eight days were taken, and
+    /// the latest reading before them of any account, which tells who was
+    /// signed in as they began: for telling who was signed in when.
+    pub fn reading_times(&self, now: DateTime<Utc>) -> Vec<(DateTime<Utc>, &str)> {
+        let cutoff = now - RECENT_READINGS;
+        let mut times = Vec::new();
+        let mut before = None;
+        for entry in &self.weekly.accounts {
+            let from = entry.readings.partition_point(|r| r.at < cutoff);
+            if let Some(reading) = from.checked_sub(1).map(|i| &entry.readings[i]) {
+                before = before.max(Some((reading.at, entry.account.as_str())));
+            }
+            times.extend(
+                entry.readings[from..]
+                    .iter()
+                    .map(|r| (r.at, entry.account.as_str())),
+            );
+        }
+        times.extend(before);
+        times
+    }
+
     /// The latest calibration per window, if it is recent enough to stand in
     /// for a fit.
     pub fn calibration(&self, account: &str, now: DateTime<Utc>) -> PercentPerUsd {
@@ -757,7 +779,7 @@ fn store<T: Serialize>(slot: &mut Slot, value: &T) {
 
 /// Writes `bytes` to a temporary file next to `path`, then renames it over
 /// `path`, so a crash leaves either the old file or the new one.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -1568,6 +1590,24 @@ mod tests {
         assert_eq!(kept[..4], expected);
         assert_eq!(kept.len(), 5);
         assert_eq!(values(&archive, later), [0.5, 4.0]);
+    }
+
+    #[test]
+    fn reading_times_tell_who_was_signed_in_as_the_last_eight_days_began() {
+        let mut archive = Archive::from_parts(Vec::new(), Vec::new());
+        let now = sample(0, 0.0).at + RECENT_READINGS;
+        // a, then b just before the eight days, a again within them.
+        archive.add_readings("a", &[sample(-30, 1.0), sample(1, 1.0)], now);
+        archive.add_readings("b", &[sample(-25, 1.0), sample(-10, 1.0)], now);
+        let mut times = archive.reading_times(now);
+        times.sort_unstable();
+        let at = |minutes| sample(minutes, 0.0).at;
+        assert_eq!(times, [(at(-10), "b"), (at(1), "a")]);
+        // So b's requests before a's return are b's, however they began.
+        assert_eq!(
+            quota::foreign_spans(times, "a"),
+            [(DateTime::<Utc>::MIN_UTC, at(1))]
+        );
     }
 
     #[test]

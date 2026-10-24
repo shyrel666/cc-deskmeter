@@ -27,7 +27,7 @@ export function Switch({ checked, onChange, label, id }: SwitchProps) {
         "swiss:h-[22px] swiss:w-[42px] swiss:rounded-[5px] swiss:groove",
         // Glass Bento: iOS-style capsule
         "glass:h-6 glass:w-11 glass:rounded-full glass:shadow-[inset_0_1px_2px_rgba(0,0,0,0.4)]",
-        checked ? "glass:bg-gradient-to-r glass:from-[#8B5CF6] glass:to-[#6366F1]" : "glass:bg-white/[0.12]",
+        checked ? "glass:[background:var(--pulse-switch-on)]" : "glass:bg-white/[0.12]",
       )}
     >
       <span

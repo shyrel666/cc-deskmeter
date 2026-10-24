@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 // Re-captures the README screenshots from the browser demo (`npm run dev`):
-//   docs/screenshots/dashboard-<theme>.png   the dashboard at the default window size, 1314×850 at 2x
-//   docs/screenshots/mini-hud-<theme>.png    the 320×140 Mini HUD plus a 28 px margin, at 2x
-//   docs/screenshots/share-card-<theme>.png  the share card, rendered by the app's own exporter
+//   docs/screenshots/dashboard-<theme>.png          the Claude dashboard at the default window size, 1314×850 at 2x
+//   docs/screenshots/chatgpt-dashboard-<theme>.png  the ChatGPT dashboard, the same way
+//   docs/screenshots/mini-hud-<theme>.png           the 320×140 Mini HUD (Claude) plus a 28 px margin, at 2x
+//   docs/screenshots/mini-hud-dual-<theme>.png      the 320×120 Mini HUD with both tools, the same way
+//   docs/screenshots/share-card-<theme>.png         the Claude share card, rendered by the app's own exporter
+//   docs/screenshots/chatgpt-share-card-<theme>.png the ChatGPT share card, the same way
 //
 // Usage: node scripts/screenshots.mjs [theme ...] [--out <dir>] [--url <dev server>] [--browser <path>]
 //
 // Drives headless Chrome or Edge over the DevTools protocol, so it needs one
 // installed and Node 22+ (global WebSocket). The numbers are the demo data in
-// src/lib/demo.ts. Nothing leaves localhost: the dev server and the browser's
-// DevTools port are the only connections.
+// src/lib/demo.ts and src/codex/demo.ts. Nothing leaves localhost: the dev
+// server and the browser's DevTools port are the only connections.
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -161,8 +164,10 @@ async function capture(page) {
   // localStorage belongs to the app's origin, so load it once before choosing a theme.
   await navigate();
 
-  for (const theme of themes) {
-    await evaluate(`localStorage.setItem("claude-pulse.theme", "${theme}"); localStorage.setItem("claude-pulse.lang", "en")`);
+  // Opens the dashboard on `provider` (the tool `C` switches to) with the Mini HUD in `hudLayout`.
+  const open = async (theme, provider, hudLayout) => {
+    await evaluate(`localStorage.setItem("claude-pulse.theme", "${theme}"); localStorage.setItem("claude-pulse.lang", "en");
+      localStorage.setItem("claude-pulse.provider", "${provider}"); localStorage.setItem("claude-pulse.hudLayout", "${hudLayout}")`);
     await navigate();
     await evaluate(`new Promise((resolve) => {
       const poll = () => (document.querySelector(".pulse-logo") && document.querySelector(".recharts-surface") ? resolve() : setTimeout(poll, 50));
@@ -170,22 +175,10 @@ async function capture(page) {
     })`);
     await evaluate("document.fonts.ready.then(() => {})");
     await sleep(SETTLE_MS);
-    write(`dashboard-${theme}.png`, await screenshot());
+  };
 
-    // The same renderer and demo data the Share dialog uses (every day, not just the
-    // snapshot's recent ones), at the size it exports.
-    const card = await evaluate(`(async () => {
-      const [{ renderShareCard }, { THEMES }, { makeDemoData, makeDemoHistory }, { toLocalDateKey }] = await Promise.all([
-        import("/src/lib/shareCard.ts"), import("/src/theme/themes.ts"), import("/src/lib/demo.ts"), import("/src/lib/format.ts"),
-      ]);
-      const now = new Date();
-      const data = { ...makeDemoData(now), daily: makeDemoHistory(now) };
-      const canvas = await renderShareCard({ data, theme: THEMES["${theme}"], lang: "en", todayKey: toLocalDateKey(now) });
-      return canvas.toDataURL("image/png").split(",")[1];
-    })()`);
-    write(`share-card-${theme}.png`, card);
-
-    // M opens the Mini HUD; in a browser it is previewed at its real window size.
+  // M opens the Mini HUD; in a browser it is previewed at its real window size.
+  const captureHud = async (name) => {
     for (const type of ["keyDown", "keyUp"]) {
       await page.send("Input.dispatchKeyEvent", { type, key: "m", code: "KeyM", windowsVirtualKeyCode: 77 });
     }
@@ -200,7 +193,40 @@ async function capture(page) {
       return { x, y, width, height };
     })()`);
     const m = HUD_MARGIN;
-    write(`mini-hud-${theme}.png`, await screenshot({ x: hud.x - m, y: hud.y - m, width: hud.width + 2 * m, height: hud.height + 2 * m }));
+    write(name, await screenshot({ x: hud.x - m, y: hud.y - m, width: hud.width + 2 * m, height: hud.height + 2 * m }));
+  };
+
+  for (const theme of themes) {
+    await open(theme, "claude", "single");
+    write(`dashboard-${theme}.png`, await screenshot());
+
+    // The same renderer and demo data the Share dialog uses (every day, not just the
+    // snapshot's recent ones), at the size it exports.
+    const card = await evaluate(`(async () => {
+      const [{ renderShareCard }, { THEMES }, { makeDemoData, makeDemoHistory }, { toLocalDateKey }] = await Promise.all([
+        import("/src/lib/shareCard.ts"), import("/src/theme/themes.ts"), import("/src/lib/demo.ts"), import("/src/lib/format.ts"),
+      ]);
+      const now = new Date();
+      const data = { ...makeDemoData(now), daily: makeDemoHistory(now) };
+      const canvas = await renderShareCard({ data, theme: THEMES["${theme}"], lang: "en", todayKey: toLocalDateKey(now) });
+      return canvas.toDataURL("image/png").split(",")[1];
+    })()`);
+    write(`share-card-${theme}.png`, card);
+    await captureHud(`mini-hud-${theme}.png`);
+
+    await open(theme, "codex", "dual");
+    write(`chatgpt-dashboard-${theme}.png`, await screenshot());
+    const codexCard = await evaluate(`(async () => {
+      const [{ renderCodexShareCard }, { CODEX_PALETTES }, { THEMES }, { makeCodexDemoHistory }] = await Promise.all([
+        import("/src/codex/shareCard.ts"), import("/src/codex/palette.ts"), import("/src/theme/themes.ts"), import("/src/codex/demo.ts"),
+      ]);
+      const canvas = await renderCodexShareCard({
+        history: makeCodexDemoHistory(new Date()), theme: THEMES["${theme}"], palette: CODEX_PALETTES["${theme}"], lang: "en", incomplete: false,
+      });
+      return canvas.toDataURL("image/png").split(",")[1];
+    })()`);
+    write(`chatgpt-share-card-${theme}.png`, codexCard);
+    await captureHud(`mini-hud-dual-${theme}.png`);
   }
 }
 

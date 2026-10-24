@@ -382,6 +382,7 @@ impl UsageStore {
     }
 
     pub fn snapshot(&mut self, now: DateTime<Utc>) -> UsageData {
+        self.update_readings(now);
         let mut data = self.history.snapshot(&self.project_meta, now, &Local);
         self.update_archive(now);
         self.snapshot_id += 1;
@@ -463,29 +464,55 @@ impl UsageStore {
         }
     }
 
+    /// Reads Desktop's samples, archives new ones, and tells the history in
+    /// which spans another account than the current one was signed in.
+    /// Call before the history's snapshot.
+    fn update_readings(&mut self, now: DateTime<Utc>) {
+        let reloaded = self.quota.reload();
+        if let Some(archive) = &mut self.archive {
+            if (reloaded || self.readings_due)
+                && let Some(tag) = self.quota.account()
+            {
+                archive.add_readings(tag, self.quota.samples(), now);
+            }
+            self.readings_due = false;
+        }
+        // The archive remembers readings Desktop's file no longer has.
+        let spans = self.account().map_or_else(Vec::new, |account| {
+            let desktop = self
+                .quota
+                .timeline()
+                .iter()
+                .map(|(at, tag)| (*at, tag.as_str()));
+            let archived = self
+                .archive
+                .iter()
+                .flat_map(|archive| archive.reading_times(now));
+            quota::foreign_spans(desktop.chain(archived), account)
+        });
+        self.history.set_foreign(spans);
+    }
+
+    /// The account Desktop is signed in to: the one of its latest sample, or
+    /// of the archive's latest reading once Desktop's file is gone.
+    fn account(&self) -> Option<&str> {
+        self.quota
+            .account()
+            .or_else(|| self.archive.as_ref()?.latest_account())
+    }
+
     fn quota_status(
         &mut self,
         open_block: Option<(DateTime<Utc>, DateTime<Utc>)>,
         now: DateTime<Utc>,
     ) -> Option<quota::QuotaStatus> {
-        let reloaded = self.quota.reload();
         // With an archive, Desktop's samples join the archived readings, which
         // also outlast them; the estimate reads the last week of those.
         let mut account = None;
-        let samples: Cow<'_, [Sample]> = match &mut self.archive {
+        let samples: Cow<'_, [Sample]> = match &self.archive {
             None => Cow::Borrowed(self.quota.samples()),
             Some(archive) => {
-                if (reloaded || self.readings_due)
-                    && let Some(tag) = self.quota.account()
-                {
-                    archive.add_readings(tag, self.quota.samples(), now);
-                }
-                self.readings_due = false;
-                let tag = self
-                    .quota
-                    .account()
-                    .or_else(|| archive.latest_account())?
-                    .to_owned();
+                let tag = self.account()?.to_owned();
                 let samples = archive.recent_samples(&tag, now);
                 account = Some(tag);
                 Cow::Owned(samples)
@@ -526,8 +553,9 @@ impl UsageStore {
         Some(status)
     }
 
-    /// This machine's spend since the weekly period began, in percentage
-    /// points of the weekly limit, per project and per model.
+    /// This machine's spend under the current account since the weekly
+    /// period began, in percentage points of the weekly limit, per project
+    /// and per model.
     fn attribute_week(&self, week: &mut quota::WeekStatus) {
         let Some(k) = week.percent_per_usd else {
             return;
@@ -694,11 +722,13 @@ impl UsageStore {
 /// What the quota estimate keeps between snapshots: the quota spend since
 /// the readings began (collecting and sorting a week of responses is the
 /// costly part) and `k` fitted on it. The spend holds while usage (the
-/// store's generation) and its window (`since`) stay; the fit while the
-/// readings stay too. Only the rest of the estimate depends on the time.
+/// store's generation), its window (`since`) and the other accounts' spans
+/// stay; the fit while the readings stay too. Only the rest of the estimate
+/// depends on the time.
 struct QuotaFit {
     generation: u64,
     since: DateTime<Utc>,
+    foreign: Vec<quota::Span>,
     spend: Arc<Spend>,
     samples: Vec<Sample>,
     fitted: PercentPerUsd,
@@ -715,7 +745,11 @@ impl QuotaFit {
         history: &History,
     ) -> Self {
         let spend = match cached {
-            Some(fit) if fit.generation == generation && fit.since == since => {
+            Some(fit)
+                if fit.generation == generation
+                    && fit.since == since
+                    && fit.foreign == history.foreign() =>
+            {
                 if fit.samples[..] == samples[..] {
                     return fit;
                 }
@@ -726,6 +760,7 @@ impl QuotaFit {
         Self {
             generation,
             since,
+            foreign: history.foreign().to_vec(),
             fitted: quota::fit(&samples, &spend),
             spend,
             samples: samples.into_owned(),
@@ -1704,6 +1739,79 @@ mod tests {
         assert_eq!(rows(&week.models), [("claude-opus-5-5".to_owned(), 7.0)]);
         // 7 % at 11:00 plus the $2 since, from ~0 % at 10:00.
         assert!((week.pace_per_hour.unwrap() - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_switch_of_account_starts_its_own_block_and_spend() {
+        let tmp = TempDir::new("account-switch");
+        let logs = tmp.0.join("projects").join("-work-alpha");
+        fs::create_dir_all(&logs).unwrap();
+        let transcript = logs.join("s.jsonl");
+        let at = |time: &str| at_utc(&format!("2026-10-18T{time}:00Z"));
+        // $4 a response: account a's, then b's after Desktop signed in to b.
+        let lines = |times: &[&str]| -> String {
+            times
+                .iter()
+                .map(|time| {
+                    let ts = format!("2026-10-18T{time}:00Z");
+                    line(&format!("m{time}"), &ts, "/work/alpha", 1_000_000) + "\n"
+                })
+                .collect()
+        };
+        fs::write(&transcript, lines(&["08:05", "09:05"])).unwrap();
+        let sample = |org: &str, time: &str, pct: u32| {
+            let t = at(time).timestamp_millis();
+            format!(r#"{{"t":{t},"org":"{org}","u":{{"fh":{pct},"sd":{pct}}}}}"#)
+        };
+        let history = tmp.0.join("plan-usage-history.json");
+        let write = |samples: &[String]| {
+            fs::write(
+                &history,
+                format!(r#"{{"version":2,"samples":[{}]}}"#, samples.join(",")),
+            )
+            .unwrap();
+        };
+        let a = vec![
+            sample("a", "08:00", 0),
+            sample("a", "08:15", 2),
+            sample("a", "09:15", 4),
+        ];
+        write(&a);
+        let mut store = UsageStore::new(Roots::from(tmp.0.join("projects")))
+            .with_quota_files(vec![history.clone()]);
+        store.open_archive(tmp.0.join("config"));
+        store.refresh();
+        let block = |data: &UsageData| {
+            let block = data.active_block.as_ref().unwrap();
+            (block.start_time, block.end_time, block.usage.message_count)
+        };
+        assert_eq!(
+            block(&store.snapshot(at("09:30"))),
+            (at("08:00"), at("13:00"), 2)
+        );
+
+        // Signed in to b at 10:00: 2 points per $4 response.
+        let b = [
+            sample("b", "10:00", 0),
+            sample("b", "10:15", 2),
+            sample("b", "10:30", 4),
+        ];
+        write(&[a.clone(), b.to_vec()].concat());
+        append(&transcript, &lines(&["10:05", "10:20", "10:35"]));
+        store.refresh();
+        let data = store.snapshot(at("10:40"));
+        assert_eq!(block(&data), (at("10:00"), at("15:00"), 3));
+        let five_hour = data.quota.unwrap().five_hour.unwrap();
+        assert_eq!(five_hour.resets_at, Some(at("15:00")));
+        // 4 % at 10:30 plus the $4 since at b's 0.5 % per dollar.
+        assert!((five_hour.estimate_percent - 6.0).abs() < 1e-9);
+
+        // Desktop forgets a's samples; the archive still knows the switch.
+        write(&b);
+        let data = store.snapshot(at("10:40"));
+        assert_eq!(block(&data), (at("10:00"), at("15:00"), 3));
+        // The totals still count both accounts' requests.
+        assert_eq!(data.total.message_count, 5);
     }
 
     fn at_utc(ts: &str) -> DateTime<Utc> {

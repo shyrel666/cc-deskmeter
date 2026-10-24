@@ -14,12 +14,12 @@ export function LogoMark({ className, markClassName }: { className?: string; mar
         strokeLinecap="round"
         strokeLinejoin="round"
       >
-        {/* Glass Bento strokes the whole mark with one diagonal brand gradient. */}
+        {/* Glass Bento strokes the whole mark with one diagonal brand gradient (the Codex view has its own). */}
         <defs>
           <linearGradient id="pulse-logo-opal" gradientUnits="userSpaceOnUse" x1="3" y1="3" x2="21" y2="21">
-            <stop offset="0" style={{ stopColor: "var(--pulse-brand-a)" }} />
-            <stop offset="0.45" style={{ stopColor: "var(--pulse-brand-b)" }} />
-            <stop offset="1" style={{ stopColor: "var(--pulse-brand-c)" }} />
+            <stop offset="0" style={{ stopColor: "var(--pulse-logo-a, var(--pulse-brand-a))" }} />
+            <stop offset="0.45" style={{ stopColor: "var(--pulse-logo-b, var(--pulse-brand-b))" }} />
+            <stop offset="1" style={{ stopColor: "var(--pulse-logo-c, var(--pulse-brand-c))" }} />
           </linearGradient>
         </defs>
         <path className="mark-prompt" d={MARK_PROMPT} />

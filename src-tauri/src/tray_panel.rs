@@ -18,9 +18,9 @@ pub const LABEL: &str = "tray";
 /// Tells the page when it is opened (`true`) or hidden (`false`).
 const OPEN_EVENT: &str = "tray-panel";
 /// Logical px; the page reports its height (`tray_panel_fit`).
-const WIDTH: f64 = 232.0;
+const WIDTH: f64 = 272.0;
 /// Until the page reports its height.
-const INITIAL_HEIGHT: f64 = 260.0;
+const INITIAL_HEIGHT: f64 = 340.0;
 const HEIGHT_RANGE: (f64, f64) = (120.0, 720.0);
 /// Kept free towards the taskbar and the screen edges, logical px, as by
 /// Windows 11's own flyouts.

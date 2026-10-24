@@ -1,21 +1,30 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { CalendarRange, Clock, Gauge, Hourglass, LayoutDashboard, Power, type LucideIcon } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { Flame, LayoutDashboard, Power, type LucideIcon } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
+import { leadWindow, liveWindow } from "../codex/pace";
+import { useWhen } from "../codex/parts";
+import { totalOf, type CodexAccount, type CodexData } from "../codex/types";
+import { useCodexAccounts, type AccountLook } from "../codex/useCodexAccounts";
+import { useCodexData } from "../hooks/useCodexData";
 import { useNow } from "../hooks/useNow";
+import { storeProvider, type Provider } from "../hooks/useProvider";
 import { useUsageData, type FeedStatus } from "../hooks/useUsageData";
 import { useI18n } from "../i18n/I18nProvider";
 import { cn } from "../lib/cn";
-import { formatClock, formatCost, formatTokens, splitDuration } from "../lib/format";
+import { formatClock, formatCost, formatPercent, formatTokens, splitDuration } from "../lib/format";
+import type { FeedState } from "../lib/usageFeed";
 import { useTheme } from "../theme/ThemeProvider";
-import type { QuotaWindow, UsageData } from "../types";
-import { quotaColor, STATUS_COLOR } from "./Header";
+import type { UsageData } from "../types";
+import { quotaColor } from "./Header";
+import { feedHealth, HudLamp, providerOption, useBump } from "./HudFrame";
 import { Meter } from "./ui/Meter";
 
 const BLOCK_SECONDS = 5 * 3600;
 /** Keep in sync with `WIDTH` in `src-tauri/src/tray_panel.rs`. */
-const PANEL_WIDTH = 232;
+const PANEL_WIDTH = 272;
+const NO_ACCOUNTS: CodexAccount[] = [];
 
 /** What the panel asks of the backend (`tray_panel_action` in `src-tauri/src/tray_panel.rs`). */
 type PanelAction = "close" | "dashboard" | "quit";
@@ -25,19 +34,27 @@ function act(action: PanelAction) {
   invoke("tray_panel_action", { action }).catch((err: unknown) => console.error(err));
 }
 
+/** Opens the dashboard on that tool's view, which the dashboard picks up from storage. */
+function openTool(provider: Provider) {
+  storeProvider(provider);
+  act("dashboard");
+}
+
 /**
- * The panel the tray icon opens on Windows, in place of a native menu: the
- * 5-hour window's countdown and quotas, the window / burn rate / today
- * figures, then the entries. About as compact as the menu it replaces. The
- * window is sized to it; in a plain browser it is previewed at its real width.
+ * The panel the tray icon opens on Windows, in place of a native menu: a card
+ * per tool (Claude, then ChatGPT once its logs turn up) with today's tokens,
+ * the countdown to its 5-hour reset and its limits, then the entries. A card
+ * opens the dashboard on its tool. The window is sized to the panel; in a
+ * plain browser it is previewed at its real width.
  */
 export function TrayPanel() {
   const native = isTauri();
-  const feed = useUsageData();
+  const claude = useUsageData();
+  const codex = useCodexData();
   const open = usePanelOpen(native);
   // Hidden, it only needs to be current when it next opens.
   const now = useNow(open ? 1000 : 60_000);
-  const body = <PanelBody {...feed} now={now} native={native} />;
+  const body = <PanelBody claude={claude} codex={codex} now={now} native={native} />;
   if (native) return body;
   return (
     <div className="tray-preview grid min-h-screen place-items-center p-6">
@@ -101,7 +118,7 @@ function useFitWindow(ref: RefObject<HTMLElement | null>, native: boolean) {
   }, [ref, native, report]);
 }
 
-/** Esc closes, Enter opens the dashboard, the arrow keys walk the entries. */
+/** Esc closes, Enter opens the dashboard, the arrow keys walk the cards and entries. */
 function useMenuKeys() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -129,102 +146,27 @@ function useMenuKeys() {
 }
 
 interface PanelBodyProps {
-  data: UsageData | null;
-  status: FeedStatus;
-  error: string | null;
-  revision: number;
+  claude: FeedState<UsageData>;
+  codex: FeedState<CodexData>;
   now: number;
   native: boolean;
 }
 
-function PanelBody({ data, status, error, revision, now, native }: PanelBodyProps) {
+function PanelBody({ claude, codex, now, native }: PanelBodyProps) {
   const { t } = useI18n();
   const root = useRef<HTMLDivElement>(null);
   useFitWindow(root, native);
   useMenuKeys();
-
-  const block = data?.activeBlock ?? null;
-  const remaining = block ? (Date.parse(block.endTime) - now) / 1000 : 0;
-  const live = block !== null && remaining > 0;
-  const quota = data?.quota ?? null;
-  const weekly = quota?.sevenDay ?? null;
-  const unhealthy = status === "error" || status === "partial";
-  const healthHint = error ?? (status === "partial" ? t.app.incomplete : t.status[status]);
-  const cost = (value: number, unpriced: number) => formatCost(value, unpriced, t.common.unpriced);
+  // No ChatGPT card for those who don't use it: none once its first read finds no sessions.
+  const withCodex = codex.data ? codex.data.fileCount > 0 : codex.status === "connecting";
 
   return (
-    <div ref={root} aria-label={t.tray.label} className="tray-panel relative cursor-default select-none font-body text-ink">
-      <section className="px-2.5 pb-3 pt-3">
-        {/* The lamp beats on each new response; opposite sits the window's span, or what is wrong. */}
-        <div className="flex h-4 items-center gap-1.5">
-          <span
-            key={revision}
-            className="pulse-dot shrink-0 !size-1.5"
-            data-idle={status !== "live"}
-            title={healthHint}
-            style={{ "--dot": STATUS_COLOR[status] } as CSSProperties}
-          />
-          <span className="pulse-label !text-[11px] leading-none">{live ? t.header.resetsIn : t.header.activeBlock}</span>
-          <span
-            className={cn("num ml-auto truncate text-[11px] leading-none", unhealthy ? "text-warn" : "text-ink-3")}
-            title={unhealthy ? healthHint : undefined}
-          >
-            {unhealthy
-              ? t.status[status]
-              : live
-                ? `${formatClock(new Date(block.startTime))}–${formatClock(new Date(block.endTime))}`
-                : null}
-          </span>
-        </div>
-        <div className="mt-2">
-          {live ? (
-            <Countdown remaining={remaining} />
-          ) : data ? (
-            <Idle icon={Hourglass} title={t.tray.idle} hint={t.tray.idleHint} />
-          ) : (
-            <Idle icon={Clock} title={t.status[status]} hint={t.app.firstScan} busy />
-          )}
-        </div>
-        {(live || weekly) && (
-          <div className="mt-3 grid grid-cols-[max-content_minmax(0,1fr)_2rem] items-center gap-x-2.5 gap-y-2">
-            {live && <FiveHourRow fiveHour={quota?.fiveHour ?? null} stale={quota?.stale ?? false} remaining={remaining} />}
-            {weekly && (
-              <QuotaRow
-                icon={CalendarRange}
-                label={t.weekly.title}
-                percent={weekly.estimatePercent}
-                color={quotaColor(weekly.estimatePercent)}
-                dim={quota?.stale}
-              />
-            )}
-          </div>
-        )}
-      </section>
-
-      {/* The burn rate carries a unit: its column gets a little more room. */}
-      <section className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_minmax(0,1fr)] border-t border-line">
-        <Stat
-          label={t.tray.block}
-          value={live ? formatTokens(block.usage.totalTokens) : "—"}
-          detail={live ? cost(block.usage.costUsd, block.usage.unpricedMessageCount) : undefined}
-        />
-        <Stat
-          label={t.tray.burnRate}
-          value={live ? formatTokens(block.burnRate.tokensPerMinute) : "—"}
-          unit={live ? t.common.perMin : undefined}
-          detail={live ? `${cost(block.burnRate.costPerHour, block.usage.unpricedMessageCount)}${t.common.perHour}` : undefined}
-          className="border-l border-line"
-        />
-        <Stat
-          label={t.tray.today}
-          value={data ? formatTokens(data.today.totalTokens) : "—"}
-          detail={data ? cost(data.today.costUsd, data.today.unpricedMessageCount) : undefined}
-          title={data?.today.unpricedMessageCount ? t.app.unpriced(data.today.unpricedMessageCount) : undefined}
-          className="border-l border-line"
-        />
-      </section>
-
-      <nav className="border-t border-line p-1">
+    <div ref={root} aria-label={t.tray.label} className="tray-panel relative cursor-default select-none p-1.5 font-body text-ink">
+      <div className="space-y-1.5">
+        <ClaudeCard feed={claude} now={now} />
+        {withCodex && <CodexCard feed={codex} now={now} />}
+      </div>
+      <nav className="mt-1.5 border-t border-line pt-1">
         <MenuItem icon={LayoutDashboard} label={t.tray.open} shortcut="↵" onClick={() => act("dashboard")} />
         <MenuItem icon={Power} label={t.tray.quit} danger onClick={() => act("quit")} />
       </nav>
@@ -232,7 +174,261 @@ function PanelBody({ data, status, error, revision, now, native }: PanelBodyProp
   );
 }
 
-/** Time to the reset: `2h 41m 57s`, or `02:41:57` on the instrument panel. */
+/** Claude: today's tokens, the 5-hour block and its burn rate, the predicted quota (or the block's clock) and the weekly estimate. */
+function ClaudeCard({ feed, now }: { feed: FeedState<UsageData>; now: number }) {
+  const { t } = useI18n();
+  const { data, status, error, revision } = feed;
+  const block = data?.activeBlock ?? null;
+  const remaining = block ? (Date.parse(block.endTime) - now) / 1000 : 0;
+  const live = block !== null && remaining > 0;
+  const quota = data?.quota ?? null;
+  const estimate = quota?.fiveHour ?? null;
+  const weekly = quota?.sevenDay ?? null;
+  const { unhealthy, hint } = feedHealth(t, status, error, t.app.incomplete);
+
+  let aside: ReactNode = null;
+  if (unhealthy) aside = <Trouble status={status} hint={hint} />;
+  else if (live) {
+    const unpriced = block.usage.unpricedMessageCount;
+    aside = (
+      <span className="num flex items-center gap-1 whitespace-nowrap text-[11px] leading-none text-ink-2">
+        <Flame className="size-3 shrink-0 text-accent swiss:hidden" strokeWidth={2} aria-hidden />
+        {formatTokens(block.burnRate.tokensPerMinute)}
+        <span className="-ml-1 text-ink-3">{t.common.perMin}</span>
+        <span className="text-ink-3">·</span>
+        {formatCost(block.burnRate.costPerHour, unpriced, t.common.unpriced, { compact: true })}
+        <span className="-ml-1 text-ink-3">{t.common.perHour}</span>
+      </span>
+    );
+  }
+
+  return (
+    <ToolCard
+      provider="claude"
+      lamp={
+        <HudLamp
+          status={status}
+          revision={revision}
+          live={live}
+          unhealthy={unhealthy}
+          hint={hint}
+          busy={data === null && status === "connecting"}
+        />
+      }
+      aside={aside}
+    >
+      <Figures
+        tokens={data?.today.totalTokens}
+        costUsd={data?.today.costUsd ?? 0}
+        unpriced={data?.today.unpricedMessageCount ?? 0}
+        resetsAt={live ? new Date(block.endTime) : null}
+        remaining={live ? remaining : null}
+        idle={data !== null && !live}
+      />
+      {data ? (
+        <Limits>
+          {!live ? (
+            <LimitRow label={t.mini.fiveHour} used={null} title={t.common.noActiveBlock} />
+          ) : estimate ? (
+            <LimitRow
+              label={t.mini.fiveHour}
+              used={estimate.estimatePercent}
+              title={t.header.quotaLabel(Math.round(estimate.estimatePercent))}
+              dim={quota?.stale}
+            />
+          ) : (
+            // Without Claude Desktop's record, the block's clock, as in the header: time, not use.
+            <LimitRow label={t.header.elapsedTag} used={(1 - remaining / BLOCK_SECONDS) * 100} title={t.header.elapsed} clock />
+          )}
+          {weekly && (
+            <LimitRow
+              label={t.mini.week}
+              used={weekly.estimatePercent}
+              title={`${t.weekly.title} ${Math.round(weekly.estimatePercent)}%`}
+              dim={quota?.stale}
+            />
+          )}
+        </Limits>
+      ) : (
+        <Note>{t.app.scanning}</Note>
+      )}
+    </ToolCard>
+  );
+}
+
+/** ChatGPT: today's tokens, and the account signed in now with its official limits, straight from `rate_limits`. */
+function CodexCard({ feed, now }: { feed: FeedState<CodexData>; now: number }) {
+  const { t } = useI18n();
+  const { data, status, error, revision } = feed;
+  const { looks } = useCodexAccounts(data?.accounts ?? NO_ACCOUNTS);
+  const current = data?.current ?? null;
+  const fiveHour = current?.fiveHour ? liveWindow(current.fiveHour, now) : null;
+  const weekly = current?.weekly ? liveWindow(current.weekly, now) : null;
+  // The countdown follows the 5-hour window, or the week on a plan without one.
+  const lead = leadWindow(current, now);
+  const resetsAt = lead?.window.resetsAt ? new Date(lead.window.resetsAt) : null;
+  const { unhealthy, hint } = feedHealth(t, status, error, t.codex.readError);
+
+  let aside: ReactNode = null;
+  if (unhealthy) aside = <Trouble status={status} hint={hint} />;
+  else if (current) aside = <Account look={current.account === null ? null : looks[current.account]} plan={current.plan} />;
+
+  let limits: ReactNode;
+  if (!data) limits = <Note>{t.codex.loading}</Note>;
+  else if (!current) limits = <Note>{t.codex.noActivity}</Note>;
+  else if (!fiveHour && !weekly) limits = <Note>{t.codex.noWindows}</Note>;
+  else {
+    limits = (
+      <Limits>
+        {fiveHour ? (
+          <LimitRow
+            label={t.mini.fiveHour}
+            used={fiveHour.usedPercent}
+            title={t.codex.quotaLabel(Math.round(fiveHour.usedPercent))}
+            fill="var(--pulse-accent)"
+            dim={fiveHour.resetsAt === null}
+          />
+        ) : (
+          <NoLimitRow label={t.mini.fiveHour} />
+        )}
+        {weekly ? (
+          <LimitRow
+            label={t.mini.week}
+            used={weekly.usedPercent}
+            title={`${t.codex.weekUsed} ${Math.round(weekly.usedPercent)}%`}
+            fill="var(--pulse-accent)"
+            dim={weekly.resetsAt === null}
+          />
+        ) : (
+          <NoLimitRow label={t.mini.week} />
+        )}
+      </Limits>
+    );
+  }
+
+  return (
+    <ToolCard
+      provider="codex"
+      lamp={
+        <HudLamp
+          status={status}
+          revision={revision}
+          live={resetsAt !== null}
+          unhealthy={unhealthy}
+          hint={hint}
+          busy={data === null && status === "connecting"}
+        />
+      }
+      aside={aside}
+    >
+      <Figures
+        tokens={data ? totalOf(data.today.tokens) : undefined}
+        costUsd={data?.today.costUsd ?? 0}
+        unpriced={data?.today.unpriced ?? 0}
+        resetsAt={resetsAt}
+        remaining={resetsAt ? (resetsAt.getTime() - now) / 1000 : null}
+        idle={lead !== null && resetsAt === null}
+        weekly={lead?.weekly}
+      />
+      {limits}
+    </ToolCard>
+  );
+}
+
+interface ToolCardProps {
+  provider: Provider;
+  lamp: ReactNode;
+  /** The far end of the first row: how fast the window burns, whose limits these are, or what is wrong. */
+  aside: ReactNode;
+  children: ReactNode;
+}
+
+/** One tool's card, in its own accent: its mark, name, lamp and `aside`, then its figures. Opens its view. */
+function ToolCard({ provider, lamp, aside, children }: ToolCardProps) {
+  const option = providerOption(provider);
+  return (
+    <button
+      type="button"
+      data-menu-item
+      data-provider={provider}
+      onClick={() => openTool(provider)}
+      className="tray-tile block w-full px-3 pb-2.5 pt-2 text-left focus-visible:outline-none"
+    >
+      <div className="flex h-5 items-center gap-1.5">
+        <span
+          className={cn(
+            "flex shrink-0 items-center gap-1 text-[12px] leading-none text-ink",
+            "warm:font-medium swiss:font-semibold swiss:tracking-tight glass:font-medium",
+          )}
+        >
+          <option.Mark className={cn("size-3 shrink-0", option.lit)} />
+          {option.label}
+        </span>
+        {lamp}
+        <span className="ml-auto flex min-w-0 justify-end pl-2">{aside}</span>
+      </div>
+      {children}
+    </button>
+  );
+}
+
+interface FiguresProps {
+  /** Today's tokens; undefined until the first snapshot. */
+  tokens: number | undefined;
+  costUsd: number;
+  unpriced: number;
+  /** When the 5-hour window resets, and the seconds left to it; null while none is open. */
+  resetsAt: Date | null;
+  remaining: number | null;
+  /** No window is open: the next request opens one. */
+  idle: boolean;
+  /** The window is the week, on a plan without a 5-hour one: the day it resets, as days to go would crowd today's figures. */
+  weekly?: boolean;
+}
+
+/** Today's tokens, large, over their API-equivalent cost; across from them the countdown to the 5-hour reset. */
+function Figures({ tokens, costUsd, unpriced, resetsAt, remaining, idle, weekly = false }: FiguresProps) {
+  const { t } = useI18n();
+  const { when } = useWhen();
+  const bump = useBump(tokens);
+  const known = tokens !== undefined;
+  return (
+    <div className="mt-2 flex items-end justify-between gap-3">
+      <div className="min-w-0">
+        <div
+          key={bump}
+          className={cn("num num-hero text-[22px] font-semibold leading-none text-ink", bump > 0 && "hud-bump")}
+        >
+          {known ? formatTokens(tokens) : "—"}
+        </div>
+        <div className="mt-1.5 flex items-baseline gap-1.5 whitespace-nowrap leading-none">
+          <span className="pulse-label !text-[10.5px]">{t.tray.today}</span>
+          {known && (
+            <span className="num text-[11px] text-ink-2">{formatCost(costUsd, unpriced, t.common.unpriced, { compact: true })}</span>
+          )}
+        </div>
+      </div>
+      {(resetsAt || idle) && (
+        <div className="min-w-0 text-right">
+          {resetsAt && remaining !== null ? (
+            weekly ? (
+              <div className="num whitespace-nowrap text-[15px] font-medium leading-none text-ink">{when(resetsAt)}</div>
+            ) : (
+              <Countdown remaining={remaining} />
+            )
+          ) : (
+            <div className="text-[13px] font-medium leading-none text-ink-3">{t.tray.idle}</div>
+          )}
+          <div className="pulse-label mt-1.5 truncate !text-[10.5px] leading-none">
+            {resetsAt ? (weekly ? t.mini.weekResets : t.tray.resetsAt(formatClock(resetsAt))) : t.tray.nextWindow}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Time to the reset: `4h 27m` with the seconds a size down, or `04:27:56` on the instrument panel. */
 function Countdown({ remaining }: { remaining: number }) {
   const { t } = useI18n();
   const { theme } = useTheme();
@@ -240,101 +436,108 @@ function Countdown({ remaining }: { remaining: number }) {
   const pad = (n: number) => n.toString().padStart(2, "0");
   if (theme.instrument) {
     return (
-      <div className="num num-hero text-[22px] font-semibold leading-none">
+      <div className="num text-[15px] font-semibold leading-none">
         {pad(hours)}:{pad(minutes)}:{pad(seconds)}
       </div>
     );
   }
   return (
     <div className="whitespace-nowrap leading-none">
-      <span className="num num-hero text-[22px] font-semibold">{t.time.hm(hours, pad(minutes))}</span>
-      <span className="num ml-1.5 text-[11px] text-ink-3">{t.time.secondsLeft(pad(seconds))}</span>
+      <span className="num text-[15px] font-medium text-ink">{t.time.hm(hours, pad(minutes))}</span>
+      <span className="num ml-1 text-[10.5px] text-ink-3">{t.time.secondsLeft(pad(seconds))}</span>
     </div>
   );
 }
 
-/** The predicted 5-hour quota, or the window's clock without Claude Desktop's record (as in the header). */
-function FiveHourRow({ fiveHour, stale, remaining }: { fiveHour: QuotaWindow | null; stale: boolean; remaining: number }) {
-  const { t } = useI18n();
-  if (fiveHour) {
-    return (
-      <QuotaRow
-        icon={Gauge}
-        label={t.header.quotaTag}
-        percent={fiveHour.estimatePercent}
-        color={quotaColor(fiveHour.estimatePercent)}
-        dim={stale}
-      />
-    );
-  }
-  return <QuotaRow icon={Clock} label={t.header.elapsedTag} percent={(1 - remaining / BLOCK_SECONDS) * 100} />;
+function Limits({ children }: { children: ReactNode }) {
+  return (
+    <div className="mt-2.5 grid grid-cols-[max-content_minmax(0,1fr)_2rem] items-center gap-x-2.5 gap-y-1.5">{children}</div>
+  );
 }
 
-interface QuotaRowProps {
-  icon: LucideIcon;
+interface LimitRowProps {
   label: string;
-  percent: number;
-  color?: string;
-  /** Claude Desktop stopped sampling: an estimate from this machine's logs alone. */
+  /** Share used, 0–100; null while no window is open. */
+  used: number | null;
+  /** The bar's accessible name. */
+  title: string;
+  /** The bar's own colour, else the theme's fill; near the limit the warning colours win. */
+  fill?: string;
+  /** The window is idle, or the estimate covers this machine alone: drawn faded. */
   dim?: boolean;
+  /** Time gone, not use: never in the warning colours. */
+  clock?: boolean;
 }
 
-/** One row of the meter grid: label, bar, percent. */
-function QuotaRow({ icon: Icon, label, percent, color, dim }: QuotaRowProps) {
-  const fade = dim ? "opacity-60" : undefined;
+/** One limit: label, bar and the share used. */
+function LimitRow({ label, used, title, fill, dim = false, clock = false }: LimitRowProps) {
+  const warning = used === null || clock ? undefined : quotaColor(used);
+  const faded = dim || used === null;
   return (
     <>
-      <span className={cn("pulse-label flex items-center gap-1 whitespace-nowrap !text-[11px] leading-none", fade)}>
-        <Icon className="size-3 swiss:hidden" strokeWidth={2} aria-hidden />
-        {label}
+      <span className={cn("pulse-label !text-[10.5px] leading-none", faded && "opacity-60")}>{label}</span>
+      <Meter
+        value={(used ?? 0) / 100}
+        label={title}
+        size="sm"
+        color={warning ?? fill}
+        live={!faded}
+        className={cn(faded && "opacity-60")}
+      />
+      <span
+        className={cn("num text-right text-[11px] leading-none", faded ? "text-ink-3" : "text-ink-2")}
+        style={{ color: warning }}
+      >
+        {used === null ? "—" : formatPercent(used / 100, 0)}
       </span>
-      <Meter value={percent / 100} label={`${label} ${Math.round(percent)}%`} size="sm" color={color} live className={fade} />
-      <span className={cn("num text-right text-[11px] leading-none text-ink-2", fade)}>{Math.round(percent)}%</span>
     </>
   );
 }
 
-function Idle({ icon: Icon, title, hint, busy = false }: { icon: LucideIcon; title: string; hint: string; busy?: boolean }) {
+/** A limit the plan has none of, said as such: a missing row would read as missing data. */
+function NoLimitRow({ label }: { label: string }) {
+  const { t } = useI18n();
   return (
-    <div className="flex items-center gap-2.5">
+    <>
+      <span className="pulse-label !text-[10.5px] leading-none opacity-60">{label}</span>
+      <span className="col-span-2 truncate text-[11px] leading-none text-ink-3">{t.codex.noLimit}</span>
+    </>
+  );
+}
+
+/** Whose limits these are: the account signed in now, named and coloured as everywhere in the app, and its plan. */
+function Account({ look, plan }: { look: AccountLook | null; plan: string | null }) {
+  const { t } = useI18n();
+  return (
+    <span className="flex min-w-0 items-center gap-1 text-[11px] leading-none text-ink-2">
       <span
+        aria-hidden
         className={cn(
-          "grid size-8 shrink-0 place-items-center text-ink-3",
-          "warm:rounded-[8px] warm:bg-raised swiss:rounded-[6px] swiss:key-cap glass:rounded-full glass:bg-white/[0.06]",
-          busy && "animate-pulse",
+          "size-2 shrink-0 rounded-[2px] swiss:rounded-[1px]",
+          // Hollow: the limits are known, whose they are is not yet.
+          !look && "border border-dashed border-ink-3",
         )}
-      >
-        <Icon className="size-4" strokeWidth={1.75} aria-hidden />
-      </span>
-      <div className="min-w-0">
-        <div className="truncate text-[12.5px] leading-5 text-ink-2">{title}</div>
-        <div className="truncate text-[11px] leading-4 text-ink-3">{hint}</div>
-      </div>
-    </div>
+        style={{ background: look?.color }}
+      />
+      <span className={cn("truncate", !look && "text-ink-3")}>{look ? look.name : t.mini.unknownAccount}</span>
+      {plan && <span className="shrink-0 text-ink-3">· {t.codex.plan(plan)}</span>}
+    </span>
   );
 }
 
-interface StatProps {
-  label: string;
-  value: string;
-  unit?: string;
-  /** Second line; left blank, it keeps the cells level. */
-  detail?: string;
-  title?: string;
-  className?: string;
-}
-
-function Stat({ label, value, unit, detail, title, className }: StatProps) {
+/** What is wrong with a tool's feed, in place of its `aside`. */
+function Trouble({ status, hint }: { status: FeedStatus; hint: string }) {
+  const { t } = useI18n();
   return (
-    <div className={cn("min-w-0 px-2.5 py-2.5", className)} title={title}>
-      <div className="pulse-label truncate !text-[11px] leading-none">{label}</div>
-      <div className="mt-1.5 truncate leading-none">
-        <span className="num num-hero text-[14px] font-semibold">{value}</span>
-        {unit && <span className="num text-[10px] text-ink-3">{unit}</span>}
-      </div>
-      <div className="num mt-1 truncate text-[11px] leading-4 text-ink-3">{detail ?? " "}</div>
-    </div>
+    <span className="truncate text-[11px] leading-none text-warn" title={hint}>
+      {t.status[status]}
+    </span>
   );
+}
+
+/** What the limits' place says while there are none to show. */
+function Note({ children }: { children: string }) {
+  return <div className="mt-2.5 line-clamp-2 text-[11px] leading-4 text-ink-3">{children}</div>;
 }
 
 interface MenuItemProps {
@@ -352,7 +555,7 @@ function MenuItem({ icon: Icon, label, shortcut, danger = false, onClick }: Menu
       data-menu-item
       onClick={onClick}
       className={cn(
-        "group flex h-8 w-full items-center gap-2.5 px-1.5 text-left text-[12.5px] text-ink-2 transition-colors",
+        "group flex h-8 w-full items-center gap-2.5 px-3 text-left text-[12.5px] text-ink-2 transition-colors",
         "hover:text-ink focus-visible:text-ink focus-visible:outline-none",
         "warm:rounded-[6px] warm:hover:bg-raised warm:focus-visible:bg-raised",
         "swiss:rounded-[5px] swiss:border swiss:border-transparent swiss:hover:key-cap swiss:focus-visible:key-cap swiss:active:key-pressed",
